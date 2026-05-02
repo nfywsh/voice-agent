@@ -14,6 +14,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from livekit.agents import tts
+from livekit.rtc import AudioFrame
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,34 @@ class QwenTTSAdapter(tts.TTS):
         self._speed = speed
         self._timeout = timeout
 
-    async def synthesize(self, text: str) -> tts.AudioFrame:
+    def synthesize(self, text: str) -> tts.SynthesizedAudio:
         """非流式合成：请求 TTS 服务并返回完整音频帧。"""
+        import uuid
+        frame_data = b"\x00\x00" * 4800  # 默认静音 100ms
+        sample_rate = OUTPUT_SAMPLE_RATE
+
+        try:
+            # 同步调用（需要在 async 上下文中调用）
+            loop = asyncio.get_event_loop()
+            frame_data, sample_rate = loop.run_until_complete(
+                self._synthesize_async(text)
+            )
+        except Exception as e:
+            logger.error(f"TTS synthesis error: {e}")
+
+        frame = AudioFrame(
+            data=frame_data,
+            sample_rate=sample_rate,
+            num_channels=1,
+            samples_per_channel=len(frame_data) // 2,
+        )
+        return tts.SynthesizedAudio(
+            frame=frame,
+            request_id=str(uuid.uuid4()),
+        )
+
+    async def _synthesize_async(self, text: str) -> tuple[bytes, int]:
+        """异步合成。"""
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(
@@ -85,34 +112,17 @@ class QwenTTSAdapter(tts.TTS):
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(f"TTS service error {resp.status}: {error_text}")
-                        # 返回静音帧作为降级
-                        return tts.AudioFrame(
-                            data=b"\x00\x00" * 4800,  # 100ms 静音 @ 48kHz 16bit
-                            sample_rate=OUTPUT_SAMPLE_RATE,
-                            num_channels=1,
-                        )
+                        return (b"\x00\x00" * 4800, OUTPUT_SAMPLE_RATE)
 
                     raw_audio = await resp.read()
                     resampled = _resample_24k_to_48k(raw_audio)
-                    return tts.AudioFrame(
-                        data=resampled,
-                        sample_rate=OUTPUT_SAMPLE_RATE,
-                        num_channels=1,
-                    )
+                    return (resampled, OUTPUT_SAMPLE_RATE)
             except asyncio.TimeoutError:
                 logger.error(f"TTS request timed out after {self._timeout}s")
-                return tts.AudioFrame(
-                    data=b"\x00\x00" * 4800,
-                    sample_rate=OUTPUT_SAMPLE_RATE,
-                    num_channels=1,
-                )
+                return (b"\x00\x00" * 4800, OUTPUT_SAMPLE_RATE)
             except Exception as e:
                 logger.error(f"TTS synthesis error: {e}")
-                return tts.AudioFrame(
-                    data=b"\x00\x00" * 4800,
-                    sample_rate=OUTPUT_SAMPLE_RATE,
-                    num_channels=1,
-                )
+                return (b"\x00\x00" * 4800, OUTPUT_SAMPLE_RATE)
 
     def stream(self) -> "QwenTTSStream":
         """返回流式合成器。"""
@@ -142,6 +152,7 @@ class QwenTTSStream(tts.SynthesizeStream):
 
     async def _run(self) -> None:
         """主循环：从队列取文本，请求 TTS，输出音频帧。"""
+        import uuid
         self._session = aiohttp.ClientSession()
         try:
             while True:
@@ -174,23 +185,33 @@ class QwenTTSStream(tts.SynthesizeStream):
                             # 累积到足够一帧再输出（约 20ms @ 48kHz = 1920 samples = 3840 bytes）
                             if len(buffer) >= 3840:
                                 resampled = _resample_24k_to_48k(buffer)
-                                frame = tts.AudioFrame(
+                                frame = AudioFrame(
                                     data=resampled,
                                     sample_rate=OUTPUT_SAMPLE_RATE,
                                     num_channels=1,
+                                    samples_per_channel=len(resampled) // 2,
                                 )
-                                self._output_ch.send_nowait(frame)
+                                synthesized = tts.SynthesizedAudio(
+                                    frame=frame,
+                                    request_id=str(uuid.uuid4()),
+                                )
+                                self._output_ch.send_nowait(synthesized)
                                 buffer = b""
 
                         # 输出剩余数据
                         if buffer:
                             resampled = _resample_24k_to_48k(buffer)
-                            frame = tts.AudioFrame(
+                            frame = AudioFrame(
                                 data=resampled,
                                 sample_rate=OUTPUT_SAMPLE_RATE,
                                 num_channels=1,
+                                samples_per_channel=len(resampled) // 2,
                             )
-                            self._output_ch.send_nowait(frame)
+                            synthesized = tts.SynthesizedAudio(
+                                frame=frame,
+                                request_id=str(uuid.uuid4()),
+                            )
+                            self._output_ch.send_nowait(synthesized)
 
                 except asyncio.TimeoutError:
                     logger.error(f"TTS stream timed out after {self._adapter._timeout}s")

@@ -25,4 +25,4 @@ ENV TTS_SERVICE_URL=http://tts-service:8001
 ENV SINGING_SERVICE_URL=http://singing-service:8002
 ENV DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
-CMD ["python", "agent.py"]
+CMD ["python", "agent.py", "start"]

@@ -12,7 +12,19 @@
       "Read(//usr/local/bin/**)",
       "Bash(/usr/bin/docker pull *)",
       "Bash(/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe pull *)",
-      "Bash(docker run *)"
+      "Bash(docker run *)",
+      "Bash(npm install *)",
+      "Bash(docker exec *)",
+      "Bash(python3 *)",
+      "Bash(pip show *)",
+      "Bash(pip3 show *)",
+      "Bash(python *)",
+      "WebSearch",
+      "WebFetch(domain:docs.livekit.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(pip3 download *)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/livekit/agents/main/livekit/agents/tts/__init__.py\")",
+      "Bash(curl -s --max-time 10 \"https://pypi.org/pypi/livekit-agents/json\")"
     ]
   }
 }

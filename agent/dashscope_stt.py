@@ -64,7 +64,7 @@ class DashScopeSTT(stt.STT):
 
     async def recognize(
         self,
-        buffer: rtc.AudioBuffer,
+        buffer: rtc.AudioFrame,
         *,
         language: str | None = None,
     ) -> stt.SpeechEvent:
@@ -75,15 +75,15 @@ class DashScopeSTT(stt.STT):
         lang = language or self._language
 
         # 获取 16kHz PCM 数据
-        frames = buffer.data
-        if hasattr(buffer, 'sample_rate') and buffer.sample_rate != _ASR_SAMPLE_RATE:
-            # 下采样
-            audio_np = np.array(frames, dtype=np.float32)
-            if buffer.sample_rate == _INPUT_SAMPLE_RATE:
-                audio_np = audio_np[::_INPUT_SAMPLE_RATE // _ASR_SAMPLE_RATE]
-            pcm_16k = (audio_np * 32767).astype(np.int16).tobytes()
-        else:
-            pcm_16k = np.array(frames, dtype=np.int16).tobytes()
+        # AudioFrame.data 是 memoryview of int16 samples
+        audio_bytes = bytes(buffer.data)
+        audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+
+        if buffer.sample_rate != _ASR_SAMPLE_RATE:
+            # 下采样：48kHz → 16kHz (每3个样本取1个)
+            audio_np = audio_np[::buffer.sample_rate // _ASR_SAMPLE_RATE]
+
+        pcm_16k = audio_np.tobytes()
 
         # 使用 DashScope OpenAI 兼容接口（非流式）
         # DashScope 的 /v1/audio/transcriptions 端点
