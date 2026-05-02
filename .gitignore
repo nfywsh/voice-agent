@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+frontend/dist/
+
+# Models (large files, download separately)
+models/Qwen3-TTS/
+models/VibeVoice-1.5B/
+models/*.bin
+models/*.safetensors
+models/*.gguf
+
+# Environment
+.env
+*.env.local
+.env.production
+
+# SSL certificates
+nginx/ssl/*.pem
+nginx/ssl/*.key
+nginx/ssl/*.crt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+docker-compose.override.yml

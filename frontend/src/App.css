@@ -1,0 +1,411 @@
+/* src/App.css */
+
+/* ============ 基础重置 ============ */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background: linear-gradient(135deg, #0f0f1a 0%, #16213e 100%);
+  min-height: 100vh;
+  color: #e0e0e0;
+}
+
+/* ============ 入房页面 ============ */
+.join-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.join-card {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 24px;
+  padding: 48px 40px;
+  max-width: 440px;
+  width: 100%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.join-card h1 {
+  text-align: center;
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  text-align: center;
+  color: #888;
+  margin-bottom: 32px;
+  font-size: 0.95rem;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+  color: #bbb;
+  font-size: 0.9rem;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e0e0e0;
+  font-size: 1rem;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: #4a9eff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.form-group input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.join-btn {
+  width: 100%;
+  padding: 14px;
+  background: linear-gradient(135deg, #4a9eff, #6c5ce7);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s;
+  margin-top: 8px;
+}
+
+.join-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(74, 158, 255, 0.3);
+}
+
+.join-btn:active {
+  transform: translateY(0);
+}
+
+.features {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  margin-top: 28px;
+  font-size: 0.85rem;
+  color: #888;
+}
+
+/* ============ 语音房间 ============ */
+.room-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 16px;
+  gap: 12px;
+}
+
+.room-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+
+.room-header h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.agent-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  font-size: 0.85rem;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.status-icon {
+  font-size: 1.1rem;
+}
+
+.status-label {
+  color: #bbb;
+}
+
+.room-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ============ 音频可视化 ============ */
+.visualizer-section {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.visualizer {
+  width: 100%;
+  height: 200px;
+}
+
+.visualizer-section .hint {
+  margin-top: 16px;
+  font-size: 0.85rem;
+  color: #888;
+  text-align: center;
+}
+
+/* ============ 对话转写 ============ */
+.transcription-panel {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.transcription-panel h3 {
+  font-size: 1rem;
+  margin-bottom: 12px;
+  color: #ccc;
+  font-weight: 500;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.messages::-webkit-scrollbar {
+  width: 4px;
+}
+
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+}
+
+.messages .hint {
+  color: #666;
+  text-align: center;
+  padding: 20px;
+  font-size: 0.9rem;
+}
+
+.message {
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  max-width: 80%;
+}
+
+.message.agent {
+  background: rgba(76, 175, 80, 0.15);
+  border: 1px solid rgba(76, 175, 80, 0.2);
+  align-self: flex-start;
+  margin-right: auto;
+}
+
+.message.user {
+  background: rgba(74, 158, 255, 0.15);
+  border: 1px solid rgba(74, 158, 255, 0.2);
+  align-self: flex-end;
+  margin-left: auto;
+  text-align: right;
+}
+
+.message .role {
+  font-weight: 600;
+  font-size: 0.75rem;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.message.agent .role {
+  color: #4caf50;
+}
+
+.message.user .role {
+  color: #4a9eff;
+}
+
+.message .text {
+  color: #ddd;
+  word-wrap: break-word;
+}
+
+.message .time {
+  display: block;
+  font-size: 0.7rem;
+  color: #666;
+  margin-top: 4px;
+}
+
+/* ============ 底部控制栏 ============ */
+.room-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 24px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+
+.control-bar {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.leave-btn {
+  padding: 10px 24px;
+  background: rgba(231, 76, 60, 0.8);
+  color: white;
+  border: 1px solid rgba(231, 76, 60, 0.4);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+
+.leave-btn:hover {
+  opacity: 0.85;
+  background: rgba(231, 76, 60, 1);
+}
+
+/* ============ 加载 & 错误 ============ */
+.loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: #888;
+  gap: 16px;
+}
+
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 3px solid rgba(255, 255, 255, 0.12);
+  border-top-color: #4a9eff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.error-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  padding: 20px;
+  text-align: center;
+  gap: 12px;
+}
+
+.error-container h2 {
+  color: #e74c3c;
+  font-size: 1.3rem;
+}
+
+.error-message {
+  color: #888;
+  font-size: 0.95rem;
+}
+
+.retry-btn {
+  padding: 12px 32px;
+  background: linear-gradient(135deg, #4a9eff, #6c5ce7);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.retry-btn:hover {
+  opacity: 0.9;
+}
+
+/* ============ 响应式 ============ */
+@media (max-width: 768px) {
+  .room-content {
+    grid-template-columns: 1fr;
+  }
+
+  .room-header {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .join-card {
+    padding: 32px 24px;
+  }
+
+  .message {
+    max-width: 90%;
+  }
+}

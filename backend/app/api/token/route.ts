@@ -1,0 +1,77 @@
+import { AccessToken, VideoGrant } from 'livekit-server-sdk';
+import { NextRequest, NextResponse } from 'next/server';
+
+/**
+ * Token 生成 API
+ *
+ * GET /api/token?room={roomName}&username={userName}
+ *
+ * 生成 LiveKit 访问令牌 (JWT)，供前端连接 LiveKit 房间使用。
+ * API Key 和 Secret 通过环境变量注入，严禁硬编码。
+ */
+export async function GET(request: NextRequest) {
+  const searchParams = request.nextUrl.searchParams;
+  const roomName = searchParams.get('room') || 'voice-demo';
+  const userName = searchParams.get('username') || 'user';
+
+  // 验证环境变量
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+
+  if (!apiKey || !apiSecret) {
+    console.error('[Token API] LIVEKIT_API_KEY or LIVEKIT_API_SECRET not configured');
+    return NextResponse.json(
+      { error: 'LiveKit credentials not configured on server' },
+      { status: 500 }
+    );
+  }
+
+  // 验证参数
+  if (!roomName.trim() || !userName.trim()) {
+    return NextResponse.json(
+      { error: 'room and username are required' },
+      { status: 400 }
+    );
+  }
+
+  // 限制房间名和用户名长度
+  const sanitizedRoom = roomName.trim().slice(0, 64);
+  const sanitizedUser = userName.trim().slice(0, 64);
+
+  try {
+    // 创建访问令牌
+    const token = new AccessToken(apiKey, apiSecret, {
+      identity: sanitizedUser,
+      name: sanitizedUser,
+      // 令牌有效期 1 小时
+      ttl: '1h',
+    });
+
+    // 授予房间权限
+    const grant: VideoGrant = {
+      room: sanitizedRoom,
+      roomJoin: true,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    };
+    token.addGrant(grant);
+
+    const jwt = await token.toJwt();
+
+    return NextResponse.json(
+      { token: jwt, room: sanitizedRoom, identity: sanitizedUser },
+      {
+        headers: {
+          'Cache-Control': 'no-store',  // 令牌不应被缓存
+        },
+      }
+    );
+  } catch (error) {
+    console.error('[Token API] Error generating token:', error);
+    return NextResponse.json(
+      { error: 'Failed to generate token' },
+      { status: 500 }
+    );
+  }
+}

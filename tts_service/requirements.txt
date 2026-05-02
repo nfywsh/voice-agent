@@ -1,0 +1,7 @@
+# tts_service/requirements.txt
+# DashScope API 模式 — 不再需要 torch/transformers 等大型依赖
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0
+aiohttp>=3.9.0
+numpy>=1.26.0

@@ -1,0 +1,161 @@
+# docker-compose.yml
+# 全双工语音聊天机器人 - 完整服务编排 (DashScope API 版本)
+#
+# 架构说明：
+#   所有 AI 能力（LLM/ASR/TTS）通过阿里云 DashScope API 调用，
+#   不再需要本地 GPU 和模型文件。
+#
+# 使用方式:
+#   1. cp .env.example .env  # 配置环境变量
+#   2. docker-compose up -d --build
+#
+# 服务说明：
+#   - nginx: 反向代理 + 静态文件
+#   - backend: Next.js Token 生成服务
+#   - livekit: WebRTC SFU 服务器
+#   - agent: LiveKit Agent (通过 DashScope API 调用 LLM/ASR)
+#   - tts-service: TTS 代理层 (通过 DashScope API 调用 Qwen3-TTS)
+#   - singing-service: 歌声服务 (Mock 模式)
+
+version: "3.8"
+
+services:
+  # ============ 1. Nginx 反向代理 ============
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+    networks:
+      - voice-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ============ 2. Next.js Token 服务 ============
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+    networks:
+      - voice-network
+    restart: unless-stopped
+
+  # ============ 3. LiveKit Server ============
+  livekit:
+    image: livekit/livekit-server:v1.7
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "${RTC_PORT_START:-50000}-${RTC_PORT_END:-50050}:${RTC_PORT_START:-50000}-${RTC_PORT_END:-50050}/udp"
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    networks:
+      - voice-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7880/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ============ 4. TTS 代理服务 (DashScope API) ============
+  tts-service:
+    build:
+      context: ./tts_service
+      dockerfile: Dockerfile
+    environment:
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_TTS_MODEL: ${DASHSCOPE_TTS_MODEL:-qwen3-tts-vd-2026-01-26}
+      HOST: "0.0.0.0"
+      PORT: "8001"
+    networks:
+      - voice-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ============ 5. 歌声服务 (Mock 模式) ============
+  singing-service:
+    build:
+      context: ./singing_service
+      dockerfile: Dockerfile
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8002"
+    networks:
+      - voice-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ============ 6. LiveKit Agent (DashScope API) ============
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    environment:
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      # DashScope API 配置 (LLM + ASR)
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_ASR_MODEL: ${DASHSCOPE_ASR_MODEL:-fun-asr-2025-11-07}
+      # LLM 配置
+      LLM_MODEL: ${LLM_MODEL:-Qwen3.5-122B-W8A8}
+      # 微服务地址
+      TTS_SERVICE_URL: http://tts-service:8001
+      SINGING_SERVICE_URL: http://singing-service:8002
+      # System Prompt
+      SYSTEM_PROMPT: ${SYSTEM_PROMPT:-}
+      PROMPT_SERVICE_URL: ${PROMPT_SERVICE_URL:-}
+      # VAD 配置
+      VAD_THRESHOLD: ${VAD_THRESHOLD:-0.5}
+      VAD_MIN_SPEECH: ${VAD_MIN_SPEECH:-0.2}
+      VAD_MIN_SILENCE: ${VAD_MIN_SILENCE:-0.3}
+      # 超时配置
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-5}
+      TTS_TIMEOUT: ${TTS_TIMEOUT:-10}
+      SINGING_TIMEOUT: ${SINGING_TIMEOUT:-30}
+    depends_on:
+      livekit:
+        condition: service_healthy
+      tts-service:
+        condition: service_healthy
+      singing-service:
+        condition: service_healthy
+    networks:
+      - voice-network
+    restart: unless-stopped
+
+networks:
+  voice-network:
+    driver: bridge

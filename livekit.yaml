@@ -1,0 +1,44 @@
+# LiveKit Server 配置
+# 参考文档: https://docs.livekit.io/realtime/
+
+# HTTP/WS 端口
+port: 7880
+
+# RTC 配置
+rtc:
+  # TCP 转发端口 (用于防火墙受限环境)
+  tcp_port: 7881
+  # UDP 端口范围 (用于媒体传输)
+  port_range_start: 50000
+  port_range_end: 50050
+  # 是否使用外部 IP (云服务器需设为 true 并配置 node_ip)
+  use_external_ip: false
+  # 节点 IP (多网卡或云服务器环境需指定)
+  # node_ip: ""
+
+# 房间配置
+room:
+  # 自动创建房间
+  auto_create: true
+  # 房间空闲超时 (秒)
+  empty_timeout: 300
+  # 房间最大参与者数
+  max_participants: 10
+
+# 日志配置
+logging:
+  level: info
+  # Pion (WebRTC) 日志级别
+  pion_level: warn
+
+# API 密钥 (务必替换为安全密钥)
+# 生产环境应通过 LIVEKIT_KEYS 环境变量传入
+keys:
+  devkey: secret
+
+# Prometheus 指标导出 (可选)
+# prometheus:
+#   port: 9090
+
+# 区域配置 (可选，多区域部署时使用)
+# region: "cn-east"
