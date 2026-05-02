@@ -24,7 +24,12 @@
       "WebFetch(domain:github.com)",
       "Bash(pip3 download *)",
       "Bash(curl -s \"https://raw.githubusercontent.com/livekit/agents/main/livekit/agents/tts/__init__.py\")",
-      "Bash(curl -s --max-time 10 \"https://pypi.org/pypi/livekit-agents/json\")"
+      "Bash(curl -s --max-time 10 \"https://pypi.org/pypi/livekit-agents/json\")",
+      "Bash(npm config *)",
+      "Bash(npm view *)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost/)",
+      "Bash(curl *)"
     ]
   }
 }
