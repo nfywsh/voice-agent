@@ -94,3 +94,89 @@ llm_base_url = os.environ.get(
 ### 已知限制
 - agent 服务没有 healthcheck（因为是 Long-running 进程，无 HTTP 端点）
 - agent 依赖 tts-service 和 singing-service，但这两个服务有 healthcheck，所以整体启动顺序可控
+
+## T14: 前端环境准备
+
+### 配置检查结果
+
+#### 1. Vite 配置 (`frontend/vite.config.js`)
+- **proxy 设置**: `/api` → `http://localhost:3000` - **正确**
+- **build.outDir**: `dist` - **正确**
+
+#### 2. Nginx 配置 (`nginx/nginx.conf`)
+- **静态文件路径**: `root /usr/share/nginx/html` - 需要确认 docker-compose 中映射到 `frontend/dist`
+- **SPA fallback**: `try_files $uri $uri/ /index.html` - **已配置**
+
+#### 3. Frontend package.json
+- **build 命令**: `vite build` - **正确**
+- **LiveKit 依赖**: `@livekit/components-react`, `@livekit/components-styles`, `livekit-client`, `livekit-server-sdk` - **已安装**
+
+#### 4. 环境变量问题
+- **问题**: 缺少 `.env.production` 文件
+- **当前状态**: 只有 `.env` 文件，`VITE_LIVEKIT_URL=ws://localhost:7880`（开发环境直连）
+- **生产环境需求**: 需要 `.env.production` 配置正确的 LiveKit URL：
+  ```
+  VITE_LIVEKIT_URL=wss://your-domain.com/livekit
+  ```
+- **影响**: 生产环境前端无法正确连接到 LiveKit 服务
+
+#### 5. 构建产物检查
+- **问题**: `frontend/dist/` 目录不存在
+- **原因**: 尚未执行构建
+- **修复**: 部署前需执行 `cd frontend && npm install && npm run build`
+
+### 修复建议
+
+1. **创建 `frontend/.env.production`**:
+```bash
+VITE_LIVEKIT_URL=wss://your-domain.com/livekit
+```
+
+2. **验证 docker-compose 静态文件映射**: 确认 nginx 服务的 volume 配置类似：
+```yaml
+nginx:
+  volumes:
+    - ./frontend/dist:/usr/share/nginx/html:ro
+```
+
+3. **部署前构建**: 执行 `cd frontend && npm install && npm run build`
+
+### 验证清单
+- [ ] `.env.production` 已创建并配置正确的 LiveKit URL
+- [ ] `frontend/dist/` 目录存在且包含构建产物
+- [ ] docker-compose.yml 中 nginx volume 正确映射到 `frontend/dist`
+- [ ] 生产环境 `VITE_LIVEKIT_URL` 使用 wss 协议
+
+## T0: Docker 镜像预拉取
+
+### 问题: 镜像拉取失败
+**环境**: WSL2 中无法直接 pull 镜像
+
+**尝试的镜像源**:
+1. `docker.io/library/python:3.11-slim` - TLS handshake timeout
+2. `mirror.gcr.io/library/python:3.11-slim` - TLS handshake timeout
+3. `registry.cn-hangzhou.aliyuncs.com/library/python:3.11-slim` - pull access denied
+4. `docker.chenxue.cc/library/python:3.11-slim` - EOF
+
+**分析**: WSL2 环境网络问题，Docker daemon 虽已安装但访问外网受限
+
+**解决方案**: 需要在 Windows 主机上配置 Docker 镜像加速器
+
+**需要在 Windows 配置的镜像加速器**:
+```json
+{
+  "registry-mirrors": [
+    "https://docker.chenxue.cc",
+    "https://dockerhub.azk8s.cn",
+    "https://reg-mirror.qiniu.com"
+  ]
+}
+```
+
+**手动拉取命令**（在 Windows Docker Desktop 或 WSL2 中）:
+```bash
+docker pull python:3.11-slim
+docker pull node:20-alpine
+docker pull nginx:alpine
+docker pull livekit/livekit-server:v1.7
+```
