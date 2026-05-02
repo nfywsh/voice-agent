@@ -53,6 +53,12 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
     networks:
       - voice-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   # ============ 3. LiveKit Server ============
@@ -129,7 +135,9 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
       DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       DASHSCOPE_ASR_MODEL: ${DASHSCOPE_ASR_MODEL:-fun-asr-2025-11-07}
-      # LLM 配置
+      # LLM 配置 (独立 API 端点，与 DashScope 分离)
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://jiajiatemp.duckdns.org:30002/}
+      LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-Qwen3.5-122B-W8A8}
       # 微服务地址
       TTS_SERVICE_URL: http://tts-service:8001

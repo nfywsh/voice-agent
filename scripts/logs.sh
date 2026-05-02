@@ -1,6 +1,7 @@
 #!/bin/bash
 # scripts/logs.sh
 # 查看服务日志
+# [已完成]
 #
 # 使用方式：
 #   bash scripts/logs.sh          # 查看所有服务日志

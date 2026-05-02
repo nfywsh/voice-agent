@@ -1,6 +1,7 @@
 #!/bin/bash
 # scripts/stop-all.sh
 # 停止所有服务
+# [已完成]
 #
 # 使用方式：bash scripts/stop-all.sh
 

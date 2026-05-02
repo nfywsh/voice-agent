@@ -274,24 +274,24 @@ async def entrypoint(ctx: JobContext):
     # 创建 STT
     stt = _create_stt()
 
-    # 创建 LLM 适配器（使用 DashScope OpenAI 兼容 API）
+    # 创建 LLM 适配器（使用独立 API 端点）
     from livekit.plugins import openai as lk_openai
 
-    dashscope_api_key = os.environ.get("DASHSCOPE_API_KEY", "")
-    dashscope_base_url = os.environ.get(
-        "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_api_key = os.environ.get("LLM_API_KEY", "")
+    llm_base_url = os.environ.get(
+        "LLM_BASE_URL", "https://jiajiatemp.duckdns.org:30002/"
     )
     llm_model = os.environ.get("LLM_MODEL", "Qwen3.5-122B-W8A8")
 
-    if not dashscope_api_key:
+    if not llm_api_key:
         raise ValueError(
-            "DASHSCOPE_API_KEY is required for LLM. "
+            "LLM_API_KEY is required for LLM. "
             "Set it in .env or docker-compose.yml"
         )
 
     llm = lk_openai.LLM(
-        api_key=dashscope_api_key,
-        base_url=dashscope_base_url,
+        api_key=llm_api_key,
+        base_url=llm_base_url,
         model=llm_model,
     )
 

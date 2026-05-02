@@ -1,6 +1,7 @@
 #!/bin/bash
 # scripts/start-all.sh
 # 启动所有服务 — 本地开发模式
+# [已完成]
 #
 # 使用方式：bash scripts/start-all.sh
 
@@ -69,9 +70,34 @@ $COMPOSE up -d
 
 echo ""
 echo "⏳ 等待服务就绪..."
-sleep 8
 
-# 检查各服务状态
+# 等待服务健康的函数
+wait_for_service() {
+    local service=$1
+    local url=$2
+    local max_attempts=${3:-30}
+    local attempt=1
+
+    echo -n "  等待 $service..."
+    while [ $attempt -le $max_attempts ]; do
+        if wget -qO- "$url" > /dev/null 2>&1; then
+            echo " ✓"
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    echo " ✗ (超时)"
+    return 1
+}
+
+# 按依赖顺序检查服务就绪
+wait_for_service "LiveKit" "http://localhost:7880/" 20
+wait_for_service "Backend" "http://localhost:3000/api/health" 20
+wait_for_service "TTS Service" "http://localhost:8001/health" 15
+wait_for_service "Singing Service" "http://localhost:8002/health" 15
+wait_for_service "Nginx" "http://localhost:80/" 10
+
 echo ""
 echo "📊 服务状态:"
 $COMPOSE ps
