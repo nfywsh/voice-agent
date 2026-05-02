@@ -11,7 +11,8 @@
       "Read(//usr/bin/**)",
       "Read(//usr/local/bin/**)",
       "Bash(/usr/bin/docker pull *)",
-      "Bash(/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe pull *)"
+      "Bash(/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe pull *)",
+      "Bash(docker run *)"
     ]
   }
 }

@@ -22,7 +22,7 @@ version: "3.8"
 services:
   # ============ 1. Nginx 反向代理 ============
   nginx:
-    image: nginx:alpine
+    image: nginx:latest
     ports:
       - "80:80"
     volumes:
@@ -63,7 +63,7 @@ services:
 
   # ============ 3. LiveKit Server ============
   livekit:
-    image: livekit/livekit-server:v1.7
+    image: livekit/livekit-server:v1.11
     ports:
       - "7880:7880"
       - "7881:7881"
