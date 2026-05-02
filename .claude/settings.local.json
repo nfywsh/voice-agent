@@ -5,7 +5,13 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(docker compose *)",
-      "Bash(python3 -c \"import yaml; yaml.safe_load\\(open\\('/mnt/d/FAE/voice-agent/docker-compose.yml'\\)\\)\")"
+      "Bash(python3 -c \"import yaml; yaml.safe_load\\(open\\('/mnt/d/FAE/voice-agent/docker-compose.yml'\\)\\)\")",
+      "Bash(docker pull *)",
+      "Bash(command -v docker)",
+      "Read(//usr/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(/usr/bin/docker pull *)",
+      "Bash(/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe pull *)"
     ]
   }
 }
