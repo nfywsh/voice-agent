@@ -167,7 +167,7 @@ services:
         condition: service_healthy
     networks:
       - voice-network
-    restart: "no"
+    restart: unless-stopped
 
 networks:
   voice-network:

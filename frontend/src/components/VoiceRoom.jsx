@@ -133,7 +133,8 @@ function VoiceRoomInner({ roomName, userName, onLeave }) {
     const handleStateChange = (newState) => {
       setConnectionState(newState);
       if (newState === ConnectionState.Disconnected) {
-        // 可以自动重连或提示用户
+        // 断开连接时调用 onLeave，让父组件显示加入页面
+        onLeave();
       }
     };
 
@@ -141,7 +142,13 @@ function VoiceRoomInner({ roomName, userName, onLeave }) {
     return () => {
       room.off('connection_state_changed', handleStateChange);
     };
-  }, [room]);
+  }, [room, onLeave]);
+
+  // 离开房间时主动断开连接，释放 LiveKit 资源
+  const handleLeave = useCallback(() => {
+    room.disconnect();
+    onLeave();
+  }, [room, onLeave]);
 
   return (
     <div className="room-container">
@@ -161,7 +168,7 @@ function VoiceRoomInner({ roomName, userName, onLeave }) {
 
       <div className="room-footer">
         <ControlBar variation="verbose" className="control-bar" />
-        <button onClick={onLeave} className="leave-btn">离开房间</button>
+        <button onClick={handleLeave} className="leave-btn">离开房间</button>
       </div>
 
       <RoomAudioRenderer />
@@ -177,6 +184,16 @@ function VoiceRoom({ roomName, userName, onLeave }) {
   const [error, setError] = useState(null);
 
   const livekitUrl = import.meta.env.VITE_LIVEKIT_URL || 'wss://localhost:7880';
+
+  // 页面刷新/卸载时，确保断开旧连接
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // 通知服务器关闭该用户的连接
+      navigator.sendBeacon('/api/cleanup?room=' + encodeURIComponent(roomName) + '&username=' + encodeURIComponent(userName));
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [roomName, userName]);
 
   // 获取 Token
   useEffect(() => {
