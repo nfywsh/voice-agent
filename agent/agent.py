@@ -52,6 +52,13 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("dashscope_stt").setLevel(logging.DEBUG)
+logging.getLogger("livekit.agents.voice.agent_activity").setLevel(logging.DEBUG)
+logging.getLogger("livekit.agents.voice.audio_recognition").setLevel(logging.DEBUG)
+logging.getLogger("livekit.agents.voice.room_io").setLevel(logging.DEBUG)
+logging.getLogger("livekit.agents.stt").setLevel(logging.DEBUG)
+logging.getLogger("livekit.agents.llm").setLevel(logging.DEBUG)
+logging.getLogger("livekit.plugins.silero").setLevel(logging.DEBUG)
 
 # ============================================================
 # System Prompt 注入入口
@@ -234,7 +241,7 @@ def _create_stt():
             "DASHSCOPE_API_KEY is required for DashScope ASR. "
             "Set it in .env or docker-compose.yml"
         )
-    model = os.environ.get("DASHSCOPE_ASR_MODEL", "fun-asr-2025-11-07")
+    model = os.environ.get("DASHSCOPE_ASR_MODEL", "fun-asr-realtime")
     language = os.environ.get("DASHSCOPE_ASR_LANGUAGE", "zh")
     logger.info(f"Using DashScope ASR: model={model}, language={language}")
     return DashScopeSTT(api_key=api_key, model=model, language=language)
@@ -246,7 +253,8 @@ def _create_stt():
 
 async def entrypoint(ctx: JobContext):
     """Agent 会话入口"""
-    logger.info(f"Agent starting, room: {ctx.room.name}")
+    logger.info(f"[entrypoint] Agent starting, room: {ctx.room.name}")
+    logger.info(f"[entrypoint] num_idle_processes env: {os.environ.get('LIVEKIT_NUM_IDLE_PROCESSES', 'NOT SET')}")
 
     # 初始化歌声处理器
     singing_url = os.environ.get("SINGING_SERVICE_URL", "http://localhost:8002")
@@ -261,6 +269,7 @@ async def entrypoint(ctx: JobContext):
     tts_url = os.environ.get("TTS_SERVICE_URL", "http://localhost:8001")
     tts_adapter = QwenTTSAdapter(
         service_url=tts_url,
+        voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
         timeout=float(os.environ.get("TTS_TIMEOUT", "10")),
     )
 
@@ -279,9 +288,9 @@ async def entrypoint(ctx: JobContext):
 
     llm_api_key = os.environ.get("LLM_API_KEY", "")
     llm_base_url = os.environ.get(
-        "LLM_BASE_URL", "https://jiajiatemp.duckdns.org:30002/"
+        "LLM_BASE_URL", "https://jiajiatemp.duckdns.org:30002/v1/"
     )
-    llm_model = os.environ.get("LLM_MODEL", "Qwen3.5-122B-W8A8")
+    llm_model = os.environ.get("LLM_MODEL", "qwen3.5-122b-a10b")
 
     if not llm_api_key:
         raise ValueError(
@@ -289,16 +298,33 @@ async def entrypoint(ctx: JobContext):
             "Set it in .env or docker-compose.yml"
         )
 
+    logger.info(f"[entrypoint] LLM config: base_url={llm_base_url}, model={llm_model}")
+
     llm = lk_openai.LLM(
         api_key=llm_api_key,
         base_url=llm_base_url,
         model=llm_model,
     )
 
+    # 验证 LLM API 连通性
+    try:
+        import openai
+        oai_client = openai.AsyncOpenAI(api_key=llm_api_key, base_url=llm_base_url)
+        logger.info(f"[entrypoint] Testing LLM API connectivity...")
+        resp = await oai_client.chat.completions.create(
+            model=llm_model,
+            messages=[{"role": "user", "content": "你好"}],
+            max_tokens=10,
+        )
+        logger.info(f"[entrypoint] LLM API OK: {resp.choices[0].message.content}")
+        await oai_client.close()
+    except Exception as e:
+        logger.error(f"[entrypoint] LLM API test FAILED: {type(e).__name__}: {e}")
+
     # 创建 Agent 实例
     agent = VoiceAssistant(singing_handler=singing_handler)
 
-    # 创建会话
+    # 启动会话
     # 注意：AgentSession 是 livekit-agents SDK 的核心类，
     # 它串联 STT → LLM → TTS 的流水线，并处理 VAD 打断
     session = AgentSession(
@@ -306,31 +332,37 @@ async def entrypoint(ctx: JobContext):
         llm=llm,
         tts=tts_adapter,
         vad=vad,
-        # turn_detector 由 VAD 驱动，无需额外配置
+        # 关闭预生成，避免 VAD 被打断后 pipeline 状态异常
+        preemptive_generation=False,
     )
 
     # 启动会话
     await session.start(
         room=ctx.room,
         agent=agent,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=True,  # 开启噪声消除，减少回声误触发
-        ),
     )
 
-    # 生成开场白
-    await session.generate_reply(
-        instructions="向用户打招呼，简短介绍自己是一个会唱歌的语音助手。"
-    )
+    logger.info(f"[entrypoint] Agent ready in room: {ctx.room.name}")
 
-    logger.info(f"Agent joined room: {ctx.room.name}")
+    # 保持 entrypoint 存活，持续监听用户语音
+    # 重要：entrypoint 函数返回 → session.aclose() → Job 终止
+    # AgentSession 由 VAD 驱动，自动处理后续用户语音（不需要 while 循环）
+    try:
+        await asyncio.Event().wait()  # 永久阻塞，直到被取消
+    except asyncio.CancelledError:
+        logger.info(f"[entrypoint] Job cancelled, room: {ctx.room.name}")
 
 
 if __name__ == "__main__":
     # 启动 Agent Worker
+    # num_idle_processes=1 确保只有一个 agent 进程在 idle 状态等待，
+    # 避免同一个 room 有多个 agent instance 同时运行，导致：
+    # 1. 第一次对话回复两次（重复处理）
+    # 2. 第二个 turn VAD 不触发（状态混乱）
+    # 3. 离开房间后无法恢复（进程堆积）
     cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
-            agent_name="voice-assistant",
+            num_idle_processes=int(os.environ.get("LIVEKIT_NUM_IDLE_PROCESSES", "1")),
         )
     )

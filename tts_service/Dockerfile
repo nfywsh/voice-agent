@@ -17,7 +17,7 @@ COPY . .
 # 环境变量 (运行时可覆盖)
 ENV HOST=0.0.0.0
 ENV PORT=8001
-ENV DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+ENV DASHSCOPE_TTS_MODEL=qwen3-tts-flash-realtime
 
 # Health check (API 模式启动快，不需要 120s start_period)
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \

@@ -1,4 +1,4 @@
-import { AccessToken, VideoGrant } from 'livekit-server-sdk';
+import { AccessToken, VideoGrant, AgentDispatchClient } from 'livekit-server-sdk';
 import { NextRequest, NextResponse } from 'next/server';
 
 /**
@@ -58,6 +58,31 @@ export async function GET(request: NextRequest) {
     token.addGrant(grant);
 
     const jwt = await token.toJwt();
+
+    // 显式调度 Agent 入房（绕过 auto-dispatch 机制）
+    // auto-dispatch（token 中 agent:true）在当前环境无法正常工作，
+    // 因此通过 API 显式创建 dispatch，让 Worker 接收 Job 并入房
+    try {
+      const livekitHost = process.env.LIVEKIT_HOST || 'http://livekit:7880';
+      const dispatchClient = new AgentDispatchClient(livekitHost, apiKey, apiSecret);
+      // 先查询房间是否已有 dispatch，避免重复创建（React StrictMode 会双重触发）
+      try {
+        const existingDispatches = await dispatchClient.listDispatch(sanitizedRoom);
+        if (existingDispatches && existingDispatches.length > 0) {
+          console.log(`[Token API] Dispatch already exists for room: ${sanitizedRoom}, skipping`);
+        } else {
+          await dispatchClient.createDispatch(sanitizedRoom, '');
+          console.log(`[Token API] Agent dispatch created for room: ${sanitizedRoom}`);
+        }
+      } catch {
+        // listDispatch 失败时 fallback 直接创建
+        await dispatchClient.createDispatch(sanitizedRoom, '');
+        console.log(`[Token API] Agent dispatch created for room: ${sanitizedRoom}`);
+      }
+    } catch (dispatchError) {
+      // dispatch 失败不影响 token 生成，仅记录警告
+      console.warn(`[Token API] Failed to create agent dispatch for room ${sanitizedRoom}:`, dispatchError);
+    }
 
     return NextResponse.json(
       { token: jwt, room: sanitizedRoom, identity: sanitizedUser },

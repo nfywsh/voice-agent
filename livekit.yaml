@@ -12,9 +12,9 @@ rtc:
   port_range_start: 50000
   port_range_end: 50050
   # 是否使用外部 IP (云服务器需设为 true 并配置 node_ip)
-  use_external_ip: false
+  use_external_ip: true
   # 节点 IP (多网卡或云服务器环境需指定)
-  # node_ip: ""
+  node_ip: "172.18.0.5"
 
 # 房间配置
 room:
@@ -31,10 +31,7 @@ logging:
   # Pion (WebRTC) 日志级别
   pion_level: warn
 
-# API 密钥 (务必替换为安全密钥)
-# 生产环境应通过 LIVEKIT_KEYS 环境变量传入
-keys:
-  devkey: secret
+# API 密钥通过环境变量 LIVEKIT_KEYS 注入，不在此文件中配置
 
 # Prometheus 指标导出 (可选)
 # prometheus:
