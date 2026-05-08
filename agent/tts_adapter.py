@@ -67,7 +67,7 @@ class QwenTTSAdapter(tts.TTS):
         service_url: str = "http://localhost:8001",
         voice: str = "default",
         speed: float = 1.0,
-        timeout: float = 10.0,
+        timeout: float = 30.0,
     ):
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=True),
@@ -198,11 +198,11 @@ class QwenTTSStream(tts.SynthesizeStream):
         session = aiohttp.ClientSession()
 
         # 发送策略：
-        # - 首片：50 字符 或 遇到句末符 立即发（低延迟）
+        # - 首片：30 字符 或 遇到句末符 立即发（低延迟）
         # - 后续：等待上一片 TTS 完成后再发下一片（避免重叠/乱序）
         #   OR 等待超 5 秒强制发（防断档，LLM 太慢时最多等 5s）
         MAX_WAIT_SEC = 5.0   # 最长等待秒数，超时强制发送
-        MAX_TTS_CHUNK = 480  # TTS 单次最大字符数（API 限制 500，留 20 余量）
+        MAX_TTS_CHUNK = 300  # TTS 单次最大字符数（API 限制 500，留余量）
 
         async def send_tts_chunk(text: str) -> None:
             """发送单个文本分片给 TTS 服务并流式输出音频"""
@@ -250,8 +250,8 @@ class QwenTTSStream(tts.SynthesizeStream):
                     timeout_trigger = first_sent and time_since_last >= MAX_WAIT_SEC
 
                     if not first_sent:
-                        # 首片：50 字符 或 句末符 立即发
-                        can_send = len(pending_text) >= 50 or re.search(r'[。！？；\n]', pending_text)
+                        # 首片：30 字符 或 句末符 立即发
+                        can_send = len(pending_text) >= 30 or re.search(r'[。！？；\n]', pending_text)
                     elif timeout_trigger:
                         # 后续超时保底：强制发送
                         can_send = True
@@ -260,11 +260,11 @@ class QwenTTSStream(tts.SynthesizeStream):
                         can_send = False
 
                     while can_send and pending_text:
-                        if not first_sent and len(pending_text) < 50:
-                            break  # 首片不足 50 字，等
+                        if not first_sent and len(pending_text) < 30:
+                            break  # 首片不足 30 字，等
 
                         # 找到最后一个句子结束符作为切割点
-                        m = re.search(r'[。！？；\n](.{0,50})$', pending_text)
+                        m = re.search(r'[。！？；\n](.{0,30})$', pending_text)
                         if m:
                             cut_pos = pending_text.rfind(m.group(0)) + 1
                         else:
@@ -283,15 +283,17 @@ class QwenTTSStream(tts.SynthesizeStream):
                         time_since_last = time.monotonic() - last_send_time
                         timeout_trigger = first_sent and time_since_last >= MAX_WAIT_SEC
 
-                        # 首片发出后，后续检查：超时 OR 有足够文本 OR 句末符
+                        # 首片发出后，后续检查：超时 OR 有足够文本 OR 句末符 OR 收到新文本
                         if pending_text:
-                            can_send = timeout_trigger or len(pending_text) >= 50 or bool(re.search(r'[。！？；\n]', pending_text))
+                            time_since_last_now = time.monotonic() - last_send_time
+                            timeout_now = first_sent and time_since_last_now >= MAX_WAIT_SEC
+                            can_send = timeout_now or len(pending_text) >= 30 or bool(re.search(r'[。！？；\n]', pending_text))
                         else:
                             can_send = False  # 等待下一个 item 触发 or 超时
 
             # 处理剩余文本（等最后一篇 TTS 完成）
             while pending_text.strip():
-                m = re.search(r'[。！？；\n](.{0,50})$', pending_text)
+                m = re.search(r'[。！？；\n](.{0,30})$', pending_text)
                 if m:
                     cut_pos = pending_text.rfind(m.group(0)) + 1
                 else:
