@@ -327,8 +327,9 @@ class QwenTTSStream(tts.SynthesizeStream):
 
             total_tts_time = time.monotonic() - t0
             logger.info(f"[QwenTTSStream._run] TTS completed, total time: {total_tts_time:.3f}s, bytes: {pcm_bytes_received}")
-            if metrics:
-                metrics.tts_end()
+            _m = _maybe_metrics()
+            if _m:
+                _m.tts_end()
 
         except asyncio.TimeoutError:
             logger.error(f"[QwenTTSStream._run] TTS stream timed out after {self._adapter._timeout}s")
