@@ -12,6 +12,8 @@ SDK v1.5.7 适配：
 
 import asyncio
 import logging
+import re
+import time
 import uuid
 from typing import Optional
 
@@ -174,6 +176,8 @@ class QwenTTSStream(tts.SynthesizeStream):
 
     async def _run(self, output_emitter: AudioEmitter) -> None:
         """主循环：从 _input_ch 取文本，累积后一次性 TTS，通过 AudioEmitter 输出。"""
+        import time
+        t0 = time.monotonic()
         logger.info(f"[QwenTTSStream._run] started, waiting for text input...")
         output_emitter.initialize(
             request_id=str(uuid.uuid4()),
@@ -182,66 +186,123 @@ class QwenTTSStream(tts.SynthesizeStream):
             mime_type="audio/pcm",  # LiveKit 会自动处理重采样
             stream=True,
         )
+        output_emitter.start_segment(segment_id=str(uuid.uuid4()))
 
-        # 累积所有文本，一次性合成（避免每个 token 建一个 segment）
+        # 流式处理：边接收 LLM 文本边分片发送给 TTS，保持流式输出
+        # _input_ch 是异步生成器，yield 出 LLM 的每个文本片段
         full_text = ""
-        async for item in self._input_ch:
-            if isinstance(item, str) and item.strip():
-                full_text += item
-
-        logger.info(f"[QwenTTSStream._run] accumulated text length: {len(full_text)}, text: {full_text[:100]}")
-
-        if not full_text.strip():
-            logger.info("[QwenTTSStream._run] empty text, skipping TTS")
-            return
-
-        segment_id = str(uuid.uuid4())
-        output_emitter.start_segment(segment_id=segment_id)
-        logger.info(f"[QwenTTSStream._run] calling TTS service: {self._adapter._service_url}")
-
-        self._pcm_frames_received = 0
-        self._pcm_bytes_received = 0
-
+        pending_text = ""  # 未发送给 TTS 的累积文本
+        first_sent = False  # 是否已发送第一片（首片不等待，直接发）
+        last_send_time = t0  # 上次发送 TTS 的时间
+        pcm_bytes_received = 0  # 累计接收的 PCM 字节数（本地变量，非实例属性）
         session = aiohttp.ClientSession()
-        try:
+
+        # 发送策略：
+        # - 首片：50 字符 或 遇到句末符 立即发（低延迟）
+        # - 后续：等待上一片 TTS 完成后再发下一片（避免重叠/乱序）
+        #   OR 等待超 5 秒强制发（防断档，LLM 太慢时最多等 5s）
+        MAX_WAIT_SEC = 5.0   # 最长等待秒数，超时强制发送
+        MAX_TTS_CHUNK = 480  # TTS 单次最大字符数（API 限制 500，留 20 余量）
+
+        async def send_tts_chunk(text: str) -> None:
+            """发送单个文本分片给 TTS 服务并流式输出音频"""
+            nonlocal first_sent, last_send_time, pcm_bytes_received
+            if not text.strip():
+                return
+            tts_start = time.monotonic()
             async with session.post(
                 f"{self._adapter._service_url}/tts/stream",
                 json={
-                    "text": full_text,
+                    "text": text,
                     "voice": self._adapter._voice,
                     "speed": self._adapter._speed,
                 },
                 timeout=aiohttp.ClientTimeout(total=self._adapter._timeout),
             ) as resp:
-                logger.info(f"[QwenTTSStream._run] TTS response status: {resp.status}")
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logger.error(f"[QwenTTSStream._run] TTS stream error {resp.status}: {error_text}")
+                    logger.error(f"[QwenTTSStream._run] TTS chunk error {resp.status}: {error_text}")
                     return
-
                 buffer = b""
-                chunk_count = 0
-                async for chunk in resp.content.iter_chunked(4096):
-                    buffer += chunk
+                async for chunk_data in resp.content.iter_chunked(4096):
+                    buffer += chunk_data
                     if len(buffer) >= 3840:
                         resampled = _resample_24k_to_48k(buffer)
-                        logger.info(f"[QwenTTSStream._run] pushing PCM frame: {len(resampled)} bytes, frame samples: {len(resampled)//2}")
                         output_emitter.push(resampled)
-                        self._pcm_frames_received += 1
-                        self._pcm_bytes_received += len(resampled)
+                        pcm_bytes_received += len(resampled)
                         buffer = b""
-                        chunk_count += 1
-                        logger.debug(f"[QwenTTSStream._run] pushed chunk {chunk_count}")
-
                 if buffer:
                     resampled = _resample_24k_to_48k(buffer)
-                    logger.info(f"[QwenTTSStream._run] pushing final PCM frame: {len(resampled)} bytes, frame samples: {len(resampled)//2}")
                     output_emitter.push(resampled)
-                    self._pcm_frames_received += 1
-                    self._pcm_bytes_received += len(resampled)
-                    chunk_count += 1
+                    pcm_bytes_received += len(resampled)
+            logger.info(f"[QwenTTSStream._run] TTS chunk ({len(text)} chars) done in {time.monotonic() - tts_start:.3f}s, bytes={pcm_bytes_received}")
+            first_sent = True
+            last_send_time = time.monotonic()
 
-                logger.info(f"[QwenTTSStream._run] TTS completed, total chunks: {chunk_count}, total PCM bytes: {self._pcm_bytes_received}, total PCM frames: {self._pcm_frames_received}")
+        try:
+            async for item in self._input_ch:
+                if isinstance(item, str) and item.strip():
+                    full_text += item
+                    pending_text += item
+
+                    # 检查是否应该发送
+                    time_since_last = time.monotonic() - last_send_time
+                    timeout_trigger = first_sent and time_since_last >= MAX_WAIT_SEC
+
+                    if not first_sent:
+                        # 首片：50 字符 或 句末符 立即发
+                        can_send = len(pending_text) >= 50 or re.search(r'[。！？；\n]', pending_text)
+                    elif timeout_trigger:
+                        # 后续超时保底：强制发送
+                        can_send = True
+                    else:
+                        # 正常情况：等上一片完成再检查
+                        can_send = False
+
+                    while can_send and pending_text:
+                        if not first_sent and len(pending_text) < 50:
+                            break  # 首片不足 50 字，等
+
+                        # 找到最后一个句子结束符作为切割点
+                        m = re.search(r'[。！？；\n](.{0,50})$', pending_text)
+                        if m:
+                            cut_pos = pending_text.rfind(m.group(0)) + 1
+                        else:
+                            # 没有句末符，硬切
+                            cut_pos = min(len(pending_text), MAX_TTS_CHUNK)
+
+                        send_text = pending_text[:cut_pos]
+                        pending_text = pending_text[cut_pos:]
+
+                        if send_text:
+                            reason = "first" if not first_sent else f"timeout({time_since_last:.1f}s)"
+                            logger.info(f"[QwenTTSStream._run] sending chunk: {len(send_text)} chars, reason={reason}, pending={len(pending_text)}")
+                            await send_tts_chunk(send_text)
+
+                        # 重新计算 timeout（因为可能已经过了几秒）
+                        time_since_last = time.monotonic() - last_send_time
+                        timeout_trigger = first_sent and time_since_last >= MAX_WAIT_SEC
+
+                        # 首片发出后，后续检查：超时 OR 有足够文本 OR 句末符
+                        if pending_text:
+                            can_send = timeout_trigger or len(pending_text) >= 50 or bool(re.search(r'[。！？；\n]', pending_text))
+                        else:
+                            can_send = False  # 等待下一个 item 触发 or 超时
+
+            # 处理剩余文本（等最后一篇 TTS 完成）
+            while pending_text.strip():
+                m = re.search(r'[。！？；\n](.{0,50})$', pending_text)
+                if m:
+                    cut_pos = pending_text.rfind(m.group(0)) + 1
+                else:
+                    cut_pos = min(len(pending_text), MAX_TTS_CHUNK)
+                send_text = pending_text[:cut_pos]
+                pending_text = pending_text[cut_pos:]
+                if send_text:
+                    await send_tts_chunk(send_text)
+
+            total_tts_time = time.monotonic() - t0
+            logger.info(f"[QwenTTSStream._run] TTS completed, total time: {total_tts_time:.3f}s, bytes: {pcm_bytes_received}")
 
         except asyncio.TimeoutError:
             logger.error(f"[QwenTTSStream._run] TTS stream timed out after {self._adapter._timeout}s")
@@ -252,4 +313,4 @@ class QwenTTSStream(tts.SynthesizeStream):
                 await session.close()
 
         output_emitter.end_segment()
-        logger.info(f"[QwenTTSStream._run] finished, segment ended, total PCM bytes pushed: {self._pcm_bytes_received}")
+        logger.info(f"[QwenTTSStream._run] finished, total PCM bytes: {pcm_bytes_received}")
