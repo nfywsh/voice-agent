@@ -664,6 +664,14 @@ async def entrypoint(ctx: JobContext):
     agent._request_id = request_id
     logger.info(f"[entrypoint] Request {request_id} started for room={room_id}")
 
+    # 创建 AgentSession（必须在注册回调之前，因为回调需要 session 对象）
+    session = AgentSession(
+        vad=vad,
+        stt=stt,
+        llm=llm,
+        tts=tts_adapter,
+    )
+
     # 注册 session 事件回调（用于监控指标）
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(ev):
