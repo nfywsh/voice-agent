@@ -585,15 +585,6 @@ async def entrypoint(ctx: JobContext):
         mock_mode=singing_mock,
     )
 
-    # 创建 TTS 适配器
-    tts_url = os.environ.get("TTS_SERVICE_URL", "http://localhost:8001")
-    tts_adapter = QwenTTSAdapter(
-        service_url=tts_url,
-        voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
-        timeout=float(os.environ.get("TTS_TIMEOUT", "10")),
-        metrics=metrics,  # 注入 metrics 用于 TTS 内部上报
-    )
-
     # 创建 VAD
     vad = silero.VAD.load(
         activation_threshold=float(os.environ.get("VAD_THRESHOLD", "0.5")),
@@ -638,7 +629,16 @@ async def entrypoint(ctx: JobContext):
     metrics = MetricsCollector()
     metrics.session_start()
 
-    # 验证 LLM API 连通性
+    # 创建 TTS 适配器（metrics 必须在之前创建）
+    tts_url = os.environ.get("TTS_SERVICE_URL", "http://localhost:8001")
+    tts_adapter = QwenTTSAdapter(
+        service_url=tts_url,
+        voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
+        timeout=float(os.environ.get("TTS_TIMEOUT", "10")),
+        metrics=metrics,  # 注入 metrics 用于 TTS 内部上报
+    )
+
+    # 创建 VAD
     try:
         import openai
         oai_client = openai.AsyncOpenAI(api_key=llm_api_key, base_url=llm_base_url)
