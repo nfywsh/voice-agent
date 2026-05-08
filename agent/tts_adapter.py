@@ -207,7 +207,7 @@ class QwenTTSStream(tts.SynthesizeStream):
         # - 后续：等待上一片 TTS 完成后再发下一片（避免重叠/乱序）
         #   OR 等待超 5 秒强制发（防断档，LLM 太慢时最多等 5s）
         MAX_WAIT_SEC = 5.0   # 最长等待秒数，超时强制发送
-        MAX_TTS_CHUNK = 300  # TTS 单次最大字符数（API 限制 500，留余量）
+        MAX_TTS_CHUNK = 450  # TTS 单次最大字符数（API 硬限制 500，留 50 字余量）
 
         # metrics 上报函数（优雅处理 metrics=None）
         def _maybe_metrics():
@@ -285,12 +285,17 @@ class QwenTTSStream(tts.SynthesizeStream):
                         if not first_sent and len(pending_text) < 30:
                             break  # 首片不足 30 字，等
 
-                        # 找到最后一个句子结束符作为切割点
-                        m = re.search(r'[。！？；\n](.{0,30})$', pending_text)
-                        if m:
-                            cut_pos = pending_text.rfind(m.group(0)) + 1
-                        else:
-                            # 没有句末符，硬切
+                        # 切割文本：优先在句子结束符处切，最多切 MAX_TTS_CHUNK 字符
+                        # 找最后一个可作为切割点的句末符
+                        cut_pos = 0
+                        for m in re.finditer(r'[。！？；\n]', pending_text):
+                            if m.end() <= MAX_TTS_CHUNK:
+                                cut_pos = m.end()  # 记录最后一个在限制内的句末符位置
+                            # 如果找到的句末符正好在限制边缘，停止寻找更后面的
+                            if m.end() == MAX_TTS_CHUNK:
+                                break
+                        if cut_pos == 0:
+                            # 没有找到合适的句末符，硬切
                             cut_pos = min(len(pending_text), MAX_TTS_CHUNK)
 
                         send_text = pending_text[:cut_pos]
@@ -315,10 +320,13 @@ class QwenTTSStream(tts.SynthesizeStream):
 
             # 处理剩余文本（等最后一篇 TTS 完成）
             while pending_text.strip():
-                m = re.search(r'[。！？；\n](.{0,30})$', pending_text)
-                if m:
-                    cut_pos = pending_text.rfind(m.group(0)) + 1
-                else:
+                cut_pos = 0
+                for m in re.finditer(r'[。！？；\n]', pending_text):
+                    if m.end() <= MAX_TTS_CHUNK:
+                        cut_pos = m.end()
+                    if m.end() == MAX_TTS_CHUNK:
+                        break
+                if cut_pos == 0:
                     cut_pos = min(len(pending_text), MAX_TTS_CHUNK)
                 send_text = pending_text[:cut_pos]
                 pending_text = pending_text[cut_pos:]
