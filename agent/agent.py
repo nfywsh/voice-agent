@@ -12,7 +12,7 @@ API 配置（全部通过环境变量注入）：
 - DASHSCOPE_API_KEY: 阿里云 DashScope API Key（共用）
 - DASHSCOPE_BASE_URL: API 基地址（默认 https://dashscope.aliyuncs.com/compatible-mode/v1）
 - DASHSCOPE_ASR_MODEL: ASR 模型（默认 fun-asr-2025-11-07）
-- DASHSCOPE_TTS_MODEL: TTS 模型（默认 qwen3-tts-vd-2026-01-26）
+- DASHSCOPE_TTS_MODEL: TTS 模型（默认 qwen3-tts-instruct-flash-realtime-2026-01-22）
 - LLM_MODEL: LLM 模型（默认 Qwen3.5-122B-W8A8）
 - LLM_CHAT_TEMPLATE_KWARGS: LLM 模板参数 JSON，默认 {"enable_thinking": false}
 - CHAT_HISTORY_MAX_TURNS: 聊天历史保留轮数，默认 10

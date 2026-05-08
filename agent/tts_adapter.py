@@ -1,7 +1,7 @@
 # agent/tts_adapter.py
 """Qwen3-TTS 适配器 — 对接 TTS 微服务（内部调用 DashScope API），支持流式合成与 24kHz→48kHz 重采样
 
-TTS 微服务现在通过阿里云 DashScope API（模型 qwen3-tts-vd-2026-01-26）进行语音合成，
+TTS 微服务现在通过阿里云 DashScope API（模型 qwen3-tts-instruct-flash-realtime-2026-01-22）进行语音合成，
 不再需要本地 GPU 模型。微服务对外接口保持不变，Agent 无感知。
 
 SDK v1.5.7 适配：
