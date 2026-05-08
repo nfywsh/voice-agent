@@ -308,6 +308,10 @@ class VoiceAssistant(Agent):
 
         if metrics:
             metrics.llm_start()
+            # 设置 contextvars，让后续的 tts_adapter 等能拿到 request_id
+            request_id = getattr(self, '_request_id', None)
+            if request_id:
+                metrics._current_request_id.set(request_id)
 
         # 通过 activity 访问 llm（与 SDK 默认实现一致的方式）
         activity = self._get_activity_or_raise()
@@ -587,6 +591,7 @@ async def entrypoint(ctx: JobContext):
         service_url=tts_url,
         voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
         timeout=float(os.environ.get("TTS_TIMEOUT", "10")),
+        metrics=metrics,  # 注入 metrics 用于 TTS 内部上报
     )
 
     # 创建 VAD
@@ -654,17 +659,10 @@ async def entrypoint(ctx: JobContext):
     agent._room_id = room_id  # 注入 room_id（用于 llm_node 中查找思考模式）
     agent._user_id = user_id  # 注入 user_id
 
-    # 启动会话
-    # 注意：AgentSession 是 livekit-agents SDK 的核心类，
-    # 它串联 STT → LLM → TTS 的流水线，并处理 VAD 打断
-    session = AgentSession(
-        stt=stt,
-        llm=llm,
-        tts=tts_adapter,
-        vad=vad,
-        # 关闭预生成，避免 VAD 被打断后 pipeline 状态异常
-        preemptive_generation=False,
-    )
+    # 开始 per-request 时序追踪
+    request_id = metrics.request_start(room_id, user_id)
+    agent._request_id = request_id
+    logger.info(f"[entrypoint] Request {request_id} started for room={room_id}")
 
     # 注册 session 事件回调（用于监控指标）
     @session.on("user_input_transcribed")
@@ -675,13 +673,17 @@ async def entrypoint(ctx: JobContext):
         else:
             metrics.stt_interim(ev.transcript)
 
+    # 注册 user_state_changed 事件（VAD 触发检测）
+    @session.on("user_state_changed")
+    def on_user_state_changed(ev):
+        """用户状态变化（VAD 检测到说话/停说话）"""
+        if str(ev.new_state) == "UserState.speaking":
+            metrics.vad_triggered(is_speech=True)
+
     # 注册 usage_updated 事件，获取 SDK 内置延迟指标
     @session.on("session_usage_updated")
     def on_session_usage_updated(ev):
         """接收 SDK 内置的延迟指标（ev 是 SessionUsageUpdatedEvent）"""
-        # ev.usage 包含 llm_node_ttft, tts_node_ttfb, e2e_latency 等
-        import logging
-        logger = logging.getLogger(__name__)
         logger.debug(f"[session_usage_updated] {ev}")
 
     # 注册数据通道处理（处理前端发送的思考模式切换命令）
@@ -699,9 +701,7 @@ async def entrypoint(ctx: JobContext):
 
     ctx.room.on("data_received", handle_data_packet)
 
-    # 注册思考模式管理回调
-    # 注意：由于 AgentSession 不直接支持动态修改 LLM 参数，
-    # 后续如需动态切换思考模式，需要扩展此逻辑
+    # 注册 session 关闭回调
     @session.on("close")
     def on_session_close():
         """session 关闭时清理思考模式状态和监控指标"""
@@ -709,7 +709,6 @@ async def entrypoint(ctx: JobContext):
         metrics.session_end()
         logger.info(f"[entrypoint] Session closed, cleaned up thinking mode for room={room_id}, user={user_id}")
 
-    # 启动会话
     await session.start(
         room=ctx.room,
         agent=agent,
@@ -718,12 +717,14 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"[entrypoint] Agent ready in room: {ctx.room.name}")
 
     # 保持 entrypoint 存活，持续监听用户语音
-    # 重要：entrypoint 函数返回 → session.aclose() → Job 终止
-    # AgentSession 由 VAD 驱动，自动处理后续用户语音（不需要 while 循环）
+    # AgentSession 由 VAD 驱动，自动处理后续用户语音
     try:
-        await asyncio.Event().wait()  # 永久阻塞，直到被取消
+        await asyncio.Event().wait()
     except asyncio.CancelledError:
         logger.info(f"[entrypoint] Job cancelled, room: {ctx.room.name}")
+    finally:
+        metrics.request_end(request_id)
+        logger.info(f"[entrypoint] Request {request_id} ended")
 
 
 if __name__ == "__main__":

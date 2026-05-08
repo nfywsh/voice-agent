@@ -15,7 +15,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import aiohttp
 import numpy as np
@@ -24,6 +24,9 @@ from scipy.signal import resample_poly
 from livekit.agents import tts
 from livekit.agents.tts.tts import AudioEmitter
 from livekit.agents.types import APIConnectOptions, DEFAULT_API_CONNECT_OPTIONS
+
+if TYPE_CHECKING:
+    from monitoring.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,7 @@ class QwenTTSAdapter(tts.TTS):
         voice: str = "default",
         speed: float = 1.0,
         timeout: float = 30.0,
+        metrics: "MetricsCollector" = None,
     ):
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=True),
@@ -78,6 +82,7 @@ class QwenTTSAdapter(tts.TTS):
         self._voice = voice
         self._speed = speed
         self._timeout = timeout
+        self._metrics = metrics
 
     def synthesize(
         self, text: str, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
@@ -204,12 +209,21 @@ class QwenTTSStream(tts.SynthesizeStream):
         MAX_WAIT_SEC = 5.0   # 最长等待秒数，超时强制发送
         MAX_TTS_CHUNK = 300  # TTS 单次最大字符数（API 限制 500，留余量）
 
+        # metrics 上报函数（优雅处理 metrics=None）
+        def _maybe_metrics():
+            return getattr(self._adapter, '_metrics', None)
+
         async def send_tts_chunk(text: str) -> None:
             """发送单个文本分片给 TTS 服务并流式输出音频"""
             nonlocal first_sent, last_send_time, pcm_bytes_received
             if not text.strip():
                 return
             tts_start = time.monotonic()
+            metrics = _maybe_metrics()
+            if metrics:
+                if not first_sent:
+                    metrics.tts_start()
+                metrics.tts_chunk_sent(len(text))
             async with session.post(
                 f"{self._adapter._service_url}/tts/stream",
                 json={
@@ -224,6 +238,7 @@ class QwenTTSStream(tts.SynthesizeStream):
                     logger.error(f"[QwenTTSStream._run] TTS chunk error {resp.status}: {error_text}")
                     return
                 buffer = b""
+                audio_started = False
                 async for chunk_data in resp.content.iter_chunked(4096):
                     buffer += chunk_data
                     if len(buffer) >= 3840:
@@ -231,10 +246,17 @@ class QwenTTSStream(tts.SynthesizeStream):
                         output_emitter.push(resampled)
                         pcm_bytes_received += len(resampled)
                         buffer = b""
+                        # 首个音频帧返回时上报 tts_first_audio
+                        if not audio_started:
+                            audio_started = True
+                            if metrics:
+                                metrics.tts_first_audio()
                 if buffer:
                     resampled = _resample_24k_to_48k(buffer)
                     output_emitter.push(resampled)
                     pcm_bytes_received += len(resampled)
+                    if not audio_started and metrics:
+                        metrics.tts_first_audio()
             logger.info(f"[QwenTTSStream._run] TTS chunk ({len(text)} chars) done in {time.monotonic() - tts_start:.3f}s, bytes={pcm_bytes_received}")
             first_sent = True
             last_send_time = time.monotonic()
@@ -305,6 +327,8 @@ class QwenTTSStream(tts.SynthesizeStream):
 
             total_tts_time = time.monotonic() - t0
             logger.info(f"[QwenTTSStream._run] TTS completed, total time: {total_tts_time:.3f}s, bytes: {pcm_bytes_received}")
+            if metrics:
+                metrics.tts_end()
 
         except asyncio.TimeoutError:
             logger.error(f"[QwenTTSStream._run] TTS stream timed out after {self._adapter._timeout}s")
