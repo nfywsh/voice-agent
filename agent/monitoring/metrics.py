@@ -94,6 +94,59 @@ TRANSCRIPT_LENGTH = Histogram(
 # ============================================================
 
 @dataclass
+class TTSChunkTrace:
+    """单个 TTS 分片的时序"""
+    seq: int
+    chars: int
+    send_time: float          # 发送到 TTS 服务的绝对时间（monotonic）
+    done_time: Optional[float] = None   # TTS 完成时间
+    success: bool = True
+    error_msg: str = ""
+    bytes_sent: int = 0       # 发送的 PCM 字节数
+
+    @property
+    def duration(self) -> Optional[float]:
+        if self.send_time and self.done_time:
+            return self.done_time - self.send_time
+        return None
+
+    @property
+    def timed_out(self) -> bool:
+        return not self.success and "timeout" in self.error_msg.lower()
+
+    def to_dict(self, session_start: Optional[float] = None) -> dict:
+        """将 monotonic 时间转为相对时间显示
+
+        Args:
+            session_start: 会话开始的 monotonic 时间，用于计算相对偏移
+        """
+        def fmt_absmono(m: float) -> str:
+            """monotonic 时间转相对偏移 HH:MM:SS 格式"""
+            if session_start is not None:
+                return f"+{round(m - session_start, 3)}s"
+            return datetime.fromtimestamp(m).strftime("%H:%M:%S")
+
+        send_str = fmt_absmono(self.send_time) if self.send_time else "—"
+        done_str = fmt_absmono(self.done_time) if self.done_time else "—"
+        dur = f"{round(self.duration, 3)}s" if self.duration else "—"
+        if not self.success:
+            result = f"❌ {self.error_msg[:20]}"
+        elif self.bytes_sent == 0:
+            result = "❌ 无音频"
+        else:
+            result = "✅ 成功"
+        return {
+            "seq": self.seq,
+            "chars": self.chars,
+            "send_time": send_str,
+            "done_time": done_str,
+            "duration": dur,
+            "result": result,
+            "bytes": self.bytes_sent,
+        }
+
+
+@dataclass
 class RequestTrace:
     """单次请求的完整时序（VAD 检测到 → TTS 播完）"""
     request_id: str
@@ -115,9 +168,53 @@ class RequestTrace:
     tts_end: Optional[float] = None
     tts_chunk_count: int = 0
     tts_chars_sent: int = 0
+    tts_chunks: list[TTSChunkTrace] = field(default_factory=list)  # 每分片详细时序
 
     @property
     def asr_duration(self) -> Optional[float]:
+        if self.asr_start and self.asr_end:
+            return self.asr_end - self.asr_start
+        return None
+
+    @property
+    def llm_duration(self) -> Optional[float]:
+        if self.llm_start and self.llm_end:
+            return self.llm_end - self.llm_start
+        return None
+
+    @property
+    def llm_ttft(self) -> Optional[float]:
+        if self.llm_start and self.llm_first_token:
+            return self.llm_first_token - self.llm_start
+        return None
+
+    @property
+    def tts_duration(self) -> Optional[float]:
+        if self.tts_start and self.tts_end:
+            return self.tts_end - self.tts_start
+        return None
+
+    @property
+    def tts_ttfb(self) -> Optional[float]:
+        if self.tts_start and self.tts_first_audio:
+            return self.tts_first_audio - self.tts_start
+        return None
+
+    @property
+    def e2e_duration(self) -> Optional[float]:
+        if self.asr_start and self.tts_end:
+            return self.tts_end - self.asr_start
+        return None
+
+    def tts_chunk_record(self, seq: int, chars: int, send_time: float,
+                          done_time: Optional[float], success: bool,
+                          error_msg: str, bytes_sent: int) -> None:
+        """记录单个 TTS 分片完成"""
+        self.tts_chunks.append(TTSChunkTrace(
+            seq=seq, chars=chars, send_time=send_time,
+            done_time=done_time, success=success,
+            error_msg=error_msg, bytes_sent=bytes_sent,
+        ))
         if self.asr_start and self.asr_end:
             return self.asr_end - self.asr_start
         return None
@@ -221,39 +318,81 @@ def _detect_stuck(trace: RequestTrace, now: float) -> tuple[Optional[str], float
     return None, 0.0, False
 
 
-def _trace_to_dict(trace: Optional[RequestTrace]) -> Optional[dict]:
+def _trace_to_dict(trace: Optional[RequestTrace], session_start: Optional[float] = None, session_start_wall: Optional[float] = None) -> Optional[dict]:
     if trace is None:
         return None
+
+    def fmt(monotonic: Optional[float]) -> Optional[str]:
+        if monotonic is None:
+            return None
+        offset = monotonic - (session_start or monotonic)
+        return f"+{round(offset, 3)}s"
+
+    def fmt_abs_wall(wall_ts: Optional[float]) -> Optional[str]:
+        """wall-clock 时间转 HH:MM:SS 格式"""
+        if wall_ts is None:
+            return None
+        return datetime.fromtimestamp(wall_ts).strftime("%H:%M:%S")
+
+    # 构建 TTS 分片明细表
+    tts_chunks_table = []
+    if trace.tts_chunks:
+        for chunk in trace.tts_chunks:
+            tts_chunks_table.append(chunk.to_dict(session_start))
+    elif trace.tts_chars_sent > 0:
+        tts_chunks_table.append({
+            "seq": 0,
+            "chars": trace.tts_chars_sent,
+            "send_time": "—",
+            "done_time": "—",
+            "duration": "—",
+            "result": "（无分片明细）",
+            "bytes": 0,
+        })
+
+    created = fmt(trace.created_at)
+    created_wall = fmt_abs_wall(session_start_wall) if session_start_wall and trace.created_at else None
+    wall_str = f" ({created_wall} 绝对时间)" if created_wall else ""
     return {
         "request_id": trace.request_id,
         "room_id": trace.room_id,
         "user_id": trace.user_id,
         "status": trace.status,
-        "created_at": datetime.fromtimestamp(trace.created_at).isoformat(),
+        "created_at": f"{created}{wall_str} (会话开始后)",
+        "e2e_duration": f"{round(trace.e2e_duration, 2)}s" if trace.e2e_duration else "—",
         "asr": {
-            "start": trace.asr_start,
-            "end": trace.asr_end,
-            "duration": trace.asr_duration,
-            "text": trace.asr_text[:50] + "..." if len(trace.asr_text) > 50 else trace.asr_text,
+            "start": fmt(trace.asr_start),
+            "end": fmt(trace.asr_end),
+            "duration": f"{round(trace.asr_duration, 3)}s" if trace.asr_duration else "—",
+            "text": trace.asr_text[:80] + "..." if len(trace.asr_text) > 80 else trace.asr_text,
         },
         "llm": {
-            "start": trace.llm_start,
-            "first_token": trace.llm_first_token,
-            "end": trace.llm_end,
-            "duration": trace.llm_duration,
-            "ttft": trace.llm_ttft,
+            "start": fmt(trace.llm_start),
+            "first_token": fmt(trace.llm_first_token),
+            "end": fmt(trace.llm_end),
+            "duration": f"{round(trace.llm_duration, 3)}s" if trace.llm_duration else "—",
+            "ttft": f"{round(trace.llm_ttft, 3)}s" if trace.llm_ttft else "—",
         },
         "tts": {
-            "start": trace.tts_start,
-            "first_audio": trace.tts_first_audio,
-            "end": trace.tts_end,
-            "duration": trace.tts_duration,
-            "ttfb": trace.tts_ttfb,
+            "start": fmt(trace.tts_start),
+            "first_audio": fmt(trace.tts_first_audio),
+            "end": fmt(trace.tts_end),
+            "duration": f"{round(trace.tts_duration, 3)}s" if trace.tts_duration else "—",
+            "ttfb": f"{round(trace.tts_ttfb, 3)}s" if trace.tts_ttfb else "—",
             "chunk_count": trace.tts_chunk_count,
             "chars_sent": trace.tts_chars_sent,
+            "chunks_table": tts_chunks_table,
         },
-        "e2e_duration": trace.e2e_duration,
     }
+
+
+def _fmt_ts(monotonic: Optional[float], session_start: Optional[float] = None) -> Optional[str]:
+    """将 monotonic 时间转为相对于 session 开始的秒数字符串"""
+    if monotonic is None:
+        return None
+    # 用 session_start 做基准，没有则直接显示原值
+    offset = monotonic - (session_start or monotonic)
+    return f"+{round(offset, 3)}s"
 
 
 # ============================================================
@@ -265,6 +404,7 @@ class MetricsCollector:
 
     __slots__ = (
         "_session_start",
+        "_session_start_wall",  # wall-clock time.time()，用于 REST API 显示时分秒
         "_request_traces",
         "_room_stats",
         "_current_request_id",
@@ -272,6 +412,7 @@ class MetricsCollector:
 
     def __init__(self):
         self._session_start: Optional[float] = None
+        self._session_start_wall: Optional[float] = None  # time.time() 对应的绝对时间
         # Per-request 时序存储
         self._request_traces: dict[str, RequestTrace] = {}
         self._room_stats: dict[str, RoomStats] = {}
@@ -283,12 +424,14 @@ class MetricsCollector:
     # ---- Prometheus 全局指标（兼容旧接口）----
     def session_start(self) -> None:
         self._session_start = time.monotonic()
+        self._session_start_wall = time.time()
         SESSION_ACTIVE.inc()
         SESSION_TOTAL.inc()
 
     def session_end(self) -> None:
         SESSION_ACTIVE.dec()
         self._session_start = None
+        self._session_start_wall = None
 
     def vad_triggered(self, is_speech: bool) -> None:
         """记录 VAD 触发（Prometheus 全局）并更新当前请求的 asr_start"""
@@ -311,15 +454,17 @@ class MetricsCollector:
     def stt_final(self, text: str) -> None:
         ASR_FINAL.inc()
         TRANSCRIPT_LENGTH.observe(len(text))
-        # 尝试更新当前请求的 ASR 结束时间
         request_id = self._current_request_id.get()
         if request_id:
             trace = self._request_traces.get(request_id)
             if trace:
-                trace.asr_end = time.monotonic()
+                now = time.monotonic()
+                if trace.asr_end is None:
+                    trace.asr_end = now
+                # 如果 asr_start 还没设置（VAD 未触发），则用 asr_end 倒推一个合理值
+                if trace.asr_start is None:
+                    trace.asr_start = now - 1.0  # 假设 ASR 耗时约 1s
                 trace.asr_text = text
-        # 兼容旧接口：也记录 Prometheus 全局 STT 时长（以 session 级别 stt_start 为起点）
-        # 注意：这个时长不准确，因为 stt_start 从未被调用
 
     def stt_error(self) -> None:
         ASR_ERROR.inc()
@@ -453,6 +598,17 @@ class MetricsCollector:
                 trace.tts_chunk_count += 1
                 trace.tts_chars_sent += chars
 
+    def tts_chunk_done(self, seq: int, chars: int, send_time: float,
+                        done_time: float, success: bool,
+                        error_msg: str, bytes_sent: int) -> None:
+        """TTS 分片完成时调用，记录详细时序"""
+        request_id = self._current_request_id.get()
+        if request_id:
+            trace = self._request_traces.get(request_id)
+            if trace:
+                trace.tts_chunk_record(seq, chars, send_time, done_time,
+                                        success, error_msg, bytes_sent)
+
     # ---- Per-room 查询接口（供 REST API 调用）----
     def get_room_stats(self, room_id: str) -> dict:
         """获取房间当前状态和最近请求"""
@@ -468,8 +624,8 @@ class MetricsCollector:
         recent = rs.recent_traces[-5:] if rs.recent_traces else []
         return {
             "room_id": room_id,
-            "active_request": _trace_to_dict(rs.active_request),
-            "recent_traces": [_trace_to_dict(t) for t in recent],
+            "active_request": _trace_to_dict(rs.active_request, self._session_start, self._session_start_wall),
+            "recent_traces": [_trace_to_dict(t, self._session_start, self._session_start_wall) for t in recent],
             "total_requests": rs.total_requests,
             "total_errors": rs.total_errors,
         }

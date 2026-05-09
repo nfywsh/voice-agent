@@ -567,6 +567,19 @@ class ThinkingModeLLM:
 
 
 # ============================================================
+# 全局 metrics 单例（entrypoint 共享同一实例，确保 HTTP server 和 room 数据指向同一个 collector）
+# ============================================================
+_global_metrics: Optional[MetricsCollector] = None
+
+
+def _get_metrics() -> MetricsCollector:
+    global _global_metrics
+    if _global_metrics is None:
+        _global_metrics = MetricsCollector()
+    return _global_metrics
+
+
+# ============================================================
 # 入口函数
 # ============================================================
 
@@ -574,7 +587,8 @@ async def entrypoint(ctx: JobContext):
     """Agent 会话入口"""
     logger.info(f"[entrypoint] Agent starting, room: {ctx.room.name}")
     logger.info(f"[entrypoint] num_idle_processes env: {os.environ.get('LIVEKIT_NUM_IDLE_PROCESSES', 'NOT SET')}")
-    logger.info(f"[entrypoint] Metrics server already running in main process on :8082")
+
+    metrics = _get_metrics()
 
     # 初始化歌声处理器
     singing_url = os.environ.get("SINGING_SERVICE_URL", "http://localhost:8002")
@@ -625,8 +639,8 @@ async def entrypoint(ctx: JobContext):
     user_id = f"agent_{room_id}"
     logger.info(f"[entrypoint] Room: {room_id}, User: {user_id}")
 
-    # 创建 metrics 收集器
-    metrics = MetricsCollector()
+    # 使用全局 metrics 单例（确保 HTTP server 和 room 数据指向同一个 collector）
+    metrics = _get_metrics()
     metrics.session_start()
 
     # 创建 TTS 适配器（metrics 必须在之前创建）
@@ -634,7 +648,9 @@ async def entrypoint(ctx: JobContext):
     tts_adapter = QwenTTSAdapter(
         service_url=tts_url,
         voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
-        timeout=float(os.environ.get("TTS_TIMEOUT", "10")),
+        timeout=float(os.environ.get("TTS_TIMEOUT", "30")),
+        max_tts_chunk=int(os.environ.get("TTS_MAX_CHUNK", "300")),
+        first_chunk_min=int(os.environ.get("TTS_FIRST_CHUNK_MIN", "30")),
         metrics=metrics,  # 注入 metrics 用于 TTS 内部上报
     )
 
@@ -742,7 +758,7 @@ if __name__ == "__main__":
         import uvicorn
         from monitoring.metrics import create_app
 
-        metrics_app, _ = create_app(port=8082)
+        metrics_app, _ = create_app(port=8082, collector=_get_metrics())
 
         def run_metrics():
             uvicorn.run(metrics_app, host="0.0.0.0", port=8082, log_level="warning")
