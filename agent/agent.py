@@ -216,6 +216,26 @@ def _get_system_prompt() -> str:
     return os.environ.get("SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT)
 
 
+async def _fetch_session_params(room_id: str):
+    """从 backend 获取会话参数 (system_prompt, chat_history)"""
+    backend_url = os.environ.get("BACKEND_URL", "http://backend:3000")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{backend_url}/api/session/params?room={room_id}",
+                timeout=aiohttp.ClientTimeout(total=3.0),
+            ) as resp:
+                if resp.ok:
+                    data = await resp.json()
+                    logger.info(f"[_fetch_session_params] room={room_id}: "
+                                f"system_prompt={'set' if data.get('system_prompt') else 'None'}, "
+                                f"chat_history={len(data.get('chat_history', []))} messages")
+                    return data
+    except Exception as e:
+        logger.warning(f"[_fetch_session_params] failed for room={room_id}: {e}")
+    return None
+
+
 # ============================================================
 # 主 Agent 类
 # ============================================================
@@ -223,17 +243,26 @@ def _get_system_prompt() -> str:
 class VoiceAssistant(Agent):
     """全双工语音助手"""
 
-    def __init__(self, *, singing_handler: SingingHandler) -> None:
-        system_prompt = _get_system_prompt()
-        super().__init__(instructions=system_prompt)
+    def __init__(self, *, singing_handler: SingingHandler, instructions: str = None) -> None:
+        if instructions is None:
+            instructions = _get_system_prompt()
+        super().__init__(instructions=instructions)
         self.singing_handler = singing_handler
         self.chat_history_manager = ChatHistoryManager(max_turns=CHAT_HISTORY_MAX_TURNS)
+        self._chat_history_injected = False
+        self._pending_chat_history = None
 
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
     ) -> None:
         """用户说完一句话后，自动截断聊天历史避免无限累积"""
         self.chat_history_manager.truncate(turn_ctx)
+        # 通知 metrics 当前 turn 结束（触发 request_end，但保留 trace 以供查询）
+        metrics = getattr(self, '_metrics', None)
+        if metrics:
+            request_id = metrics._current_request_id.get()
+            if request_id:
+                metrics.request_end(request_id)
 
     # ============================================================
     # 思考模式控制
@@ -308,10 +337,15 @@ class VoiceAssistant(Agent):
 
         if metrics:
             metrics.llm_start()
-            # 设置 contextvars，让后续的 tts_adapter 等能拿到 request_id
-            request_id = getattr(self, '_request_id', None)
-            if request_id:
-                metrics._current_request_id.set(request_id)
+            # 提取对话内容用于监控显示（精简格式：只保留 role + content）
+            items = chat_ctx.to_dict().get("items", [])
+            simplified = [
+                {"role": it.get("role"), "content": it.get("content")}
+                for it in items
+                if it.get("role") in ("system", "user", "assistant") and it.get("content")
+            ]
+            import json
+            metrics.llm_input(json.dumps(simplified, ensure_ascii=False))
 
         # 通过 activity 访问 llm（与 SDK 默认实现一致的方式）
         activity = self._get_activity_or_raise()
@@ -328,6 +362,9 @@ class VoiceAssistant(Agent):
                     if metrics:
                         metrics.llm_first_token()
                     first_chunk = False
+
+                if metrics and hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content') and chunk.delta.content:
+                    metrics.llm_output(chunk.delta.content)
 
                 yield chunk
 
@@ -585,7 +622,7 @@ def _get_metrics() -> MetricsCollector:
 
 async def entrypoint(ctx: JobContext):
     """Agent 会话入口"""
-    logger.info(f"[entrypoint] Agent starting, room: {ctx.room.name}")
+    logger.info(f"[entrypoint] Agent starting, room: {ctx.room.name}, dispatch_id={getattr(ctx, 'dispatch_id', 'N/A')}")
     logger.info(f"[entrypoint] num_idle_processes env: {os.environ.get('LIVEKIT_NUM_IDLE_PROCESSES', 'NOT SET')}")
 
     metrics = _get_metrics()
@@ -669,15 +706,34 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logger.error(f"[entrypoint] LLM API test FAILED: {type(e).__name__}: {e}")
 
+    # 从 backend 获取会话参数
+    session_params = None
+    try:
+        session_params = await _fetch_session_params(room_id)
+    except Exception as e:
+        logger.warning(f"[entrypoint] Session params fetch error: {e}")
+
+    # 优先级: session params > env var > default
+    if session_params and session_params.get("system_prompt"):
+        effective_system_prompt = session_params["system_prompt"]
+    else:
+        effective_system_prompt = os.environ.get("SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT)
+
+    # 存储 chat_history 在首次 on_user_turn_completed 时注入
+    _pending_chat_history = session_params.get("chat_history") if session_params else None
+
     # 创建 Agent 实例
-    agent = VoiceAssistant(singing_handler=singing_handler)
+    agent = VoiceAssistant(singing_handler=singing_handler, instructions=effective_system_prompt)
     agent._metrics = metrics  # 注入 metrics 收集器
     agent._room_id = room_id  # 注入 room_id（用于 llm_node 中查找思考模式）
     agent._user_id = user_id  # 注入 user_id
+    agent._pending_chat_history = _pending_chat_history
 
-    # 开始 per-request 时序追踪
+    # 开始 per-request 时序追踪（必须在 session.start() 之前，确保回调能访问到 active request）
     request_id = metrics.request_start(room_id, user_id)
-    agent._request_id = request_id
+    agent._request_id = request_id  # 仅用于 llm_node 中查找当前 request_id（llm_node 是同步闭包）
+    # 捕获到本地变量防止 finally 中读取时被后续 job 覆盖
+    _this_request_id = request_id
     logger.info(f"[entrypoint] Request {request_id} started for room={room_id}")
 
     # 创建 AgentSession（必须在注册回调之前，因为回调需要 session 对象）
@@ -691,8 +747,21 @@ async def entrypoint(ctx: JobContext):
     # 注册 session 事件回调（用于监控指标）
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(ev):
-        """用户语音被识别为文字后记录指标（ev 是 UserInputTranscribedEvent）"""
+        """用户语音被识别为文字后记录指标（ev 是 UserInputTranscribedEvent）
+
+        per-turn split 检测：如果当前 trace 已进展到 LLM 或更后阶段，
+        则说明用户在上一轮回复结束前又说了新的话（打断场景），此时创建新 trace。
+        """
         if ev.is_final:
+            request_id = metrics._current_request_id.get()
+            trace = metrics._request_traces.get(request_id) if request_id else None
+            # 如果当前 trace 的 LLM 已开始，说明这是新一轮语音输入
+            if trace and trace.llm_start is not None:
+                # 前一轮尚未结束，但用户又说了新的话——创建新 trace
+                new_request_id = metrics.request_start(room_id, user_id)
+                metrics._current_request_id.set(new_request_id)
+                agent._request_id = new_request_id
+                logger.info(f"[user_input_transcribed] Per-turn split: llm_start={trace.llm_start}, creating new trace {new_request_id}")
             metrics.stt_final(ev.transcript)
         else:
             metrics.stt_interim(ev.transcript)
@@ -728,9 +797,8 @@ async def entrypoint(ctx: JobContext):
     # 注册 session 关闭回调
     @session.on("close")
     def on_session_close():
-        """session 关闭时清理思考模式状态和监控指标"""
+        """session 关闭时清理思考模式状态"""
         clear_thinking_mode(room_id, user_id)
-        metrics.session_end()
         logger.info(f"[entrypoint] Session closed, cleaned up thinking mode for room={room_id}, user={user_id}")
 
     await session.start(
@@ -747,8 +815,8 @@ async def entrypoint(ctx: JobContext):
     except asyncio.CancelledError:
         logger.info(f"[entrypoint] Job cancelled, room: {ctx.room.name}")
     finally:
-        metrics.request_end(request_id)
-        logger.info(f"[entrypoint] Request {request_id} ended")
+        metrics.request_end(_this_request_id)
+        logger.info(f"[entrypoint] Request {_this_request_id} ended")
 
 
 if __name__ == "__main__":

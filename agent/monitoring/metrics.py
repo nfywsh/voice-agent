@@ -26,11 +26,14 @@
 """
 
 import contextvars
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from prometheus_client import (
     Counter,
@@ -123,18 +126,18 @@ class TTSChunkTrace:
         def fmt_absmono(m: float) -> str:
             """monotonic 时间转相对偏移 HH:MM:SS 格式"""
             if session_start is not None:
-                return f"+{round(m - session_start, 3)}s"
+                return f"{round(m - session_start, 3):+.3f}s"
             return datetime.fromtimestamp(m).strftime("%H:%M:%S")
 
         send_str = fmt_absmono(self.send_time) if self.send_time else "—"
         done_str = fmt_absmono(self.done_time) if self.done_time else "—"
         dur = f"{round(self.duration, 3)}s" if self.duration else "—"
         if not self.success:
-            result = f"❌ {self.error_msg[:20]}"
+            result = f"failed {self.error_msg[:20]}"
         elif self.bytes_sent == 0:
-            result = "❌ 无音频"
+            result = "failed no_audio"
         else:
-            result = "✅ 成功"
+            result = "success"
         return {
             "seq": self.seq,
             "chars": self.chars,
@@ -154,6 +157,7 @@ class RequestTrace:
     user_id: str
     status: str = "in_progress"  # in_progress | done | error
     created_at: float = field(default_factory=time.monotonic)
+    created_at_wall: float = field(default_factory=time.time)  # wall-clock for cross-process display
 
     asr_start: Optional[float] = None
     asr_end: Optional[float] = None
@@ -162,6 +166,8 @@ class RequestTrace:
     llm_start: Optional[float] = None
     llm_first_token: Optional[float] = None
     llm_end: Optional[float] = None
+    llm_input: str = ""
+    llm_output: str = ""
 
     tts_start: Optional[float] = None
     tts_first_audio: Optional[float] = None
@@ -215,33 +221,6 @@ class RequestTrace:
             done_time=done_time, success=success,
             error_msg=error_msg, bytes_sent=bytes_sent,
         ))
-        if self.asr_start and self.asr_end:
-            return self.asr_end - self.asr_start
-        return None
-
-    @property
-    def llm_duration(self) -> Optional[float]:
-        if self.llm_start and self.llm_end:
-            return self.llm_end - self.llm_start
-        return None
-
-    @property
-    def llm_ttft(self) -> Optional[float]:
-        if self.llm_start and self.llm_first_token:
-            return self.llm_first_token - self.llm_start
-        return None
-
-    @property
-    def tts_duration(self) -> Optional[float]:
-        if self.tts_start and self.tts_end:
-            return self.tts_end - self.tts_start
-        return None
-
-    @property
-    def tts_ttfb(self) -> Optional[float]:
-        if self.tts_start and self.tts_first_audio:
-            return self.tts_first_audio - self.tts_start
-        return None
 
     @property
     def e2e_duration(self) -> Optional[float]:
@@ -318,27 +297,27 @@ def _detect_stuck(trace: RequestTrace, now: float) -> tuple[Optional[str], float
     return None, 0.0, False
 
 
-def _trace_to_dict(trace: Optional[RequestTrace], session_start: Optional[float] = None, session_start_wall: Optional[float] = None) -> Optional[dict]:
+def _trace_to_dict(trace: Optional[RequestTrace]) -> Optional[dict]:
     if trace is None:
         return None
 
     def fmt(monotonic: Optional[float]) -> Optional[str]:
         if monotonic is None:
             return None
-        offset = monotonic - (session_start or monotonic)
-        return f"+{round(offset, 3)}s"
+        offset = monotonic - (trace.created_at or monotonic)
+        return f"{round(offset, 3):+.3f}s"
 
-    def fmt_abs_wall(wall_ts: Optional[float]) -> Optional[str]:
+    def fmt_hhmmss(wall_ts: Optional[float]) -> Optional[str]:
         """wall-clock 时间转 HH:MM:SS 格式"""
         if wall_ts is None:
             return None
         return datetime.fromtimestamp(wall_ts).strftime("%H:%M:%S")
 
-    # 构建 TTS 分片明细表
+    # 构建 TTS 分片明细表（按 seq 升序排列）
     tts_chunks_table = []
     if trace.tts_chunks:
-        for chunk in trace.tts_chunks:
-            tts_chunks_table.append(chunk.to_dict(session_start))
+        for chunk in sorted(trace.tts_chunks, key=lambda c: c.seq):
+            tts_chunks_table.append(chunk.to_dict(trace.created_at))
     elif trace.tts_chars_sent > 0:
         tts_chunks_table.append({
             "seq": 0,
@@ -350,15 +329,10 @@ def _trace_to_dict(trace: Optional[RequestTrace], session_start: Optional[float]
             "bytes": 0,
         })
 
-    created = fmt(trace.created_at)
-    created_wall = fmt_abs_wall(session_start_wall) if session_start_wall and trace.created_at else None
-    wall_str = f" ({created_wall} 绝对时间)" if created_wall else ""
     return {
         "request_id": trace.request_id,
-        "room_id": trace.room_id,
-        "user_id": trace.user_id,
         "status": trace.status,
-        "created_at": f"{created}{wall_str} (会话开始后)",
+        "created_at": fmt_hhmmss(trace.created_at_wall),
         "e2e_duration": f"{round(trace.e2e_duration, 2)}s" if trace.e2e_duration else "—",
         "asr": {
             "start": fmt(trace.asr_start),
@@ -371,14 +345,16 @@ def _trace_to_dict(trace: Optional[RequestTrace], session_start: Optional[float]
             "first_token": fmt(trace.llm_first_token),
             "end": fmt(trace.llm_end),
             "duration": f"{round(trace.llm_duration, 3)}s" if trace.llm_duration else "—",
-            "ttft": f"{round(trace.llm_ttft, 3)}s" if trace.llm_ttft else "—",
+            "ttft": f"{round(trace.llm_ttft, 3):+.3f}s" if trace.llm_ttft else "—",
+            "input": trace.llm_input[:200] + "..." if len(trace.llm_input) > 200 else trace.llm_input,
+            "output": trace.llm_output[:300] + "..." if len(trace.llm_output) > 300 else trace.llm_output,
         },
         "tts": {
             "start": fmt(trace.tts_start),
             "first_audio": fmt(trace.tts_first_audio),
             "end": fmt(trace.tts_end),
             "duration": f"{round(trace.tts_duration, 3)}s" if trace.tts_duration else "—",
-            "ttfb": f"{round(trace.tts_ttfb, 3)}s" if trace.tts_ttfb else "—",
+            "ttfb": f"{round(trace.tts_ttfb, 3):+.3f}s" if trace.tts_ttfb else "—",
             "chunk_count": trace.tts_chunk_count,
             "chars_sent": trace.tts_chars_sent,
             "chunks_table": tts_chunks_table,
@@ -392,7 +368,7 @@ def _fmt_ts(monotonic: Optional[float], session_start: Optional[float] = None) -
         return None
     # 用 session_start 做基准，没有则直接显示原值
     offset = monotonic - (session_start or monotonic)
-    return f"+{round(offset, 3)}s"
+    return f"{round(offset, 3):+.3f}s"
 
 
 # ============================================================
@@ -423,6 +399,10 @@ class MetricsCollector:
 
     # ---- Prometheus 全局指标（兼容旧接口）----
     def session_start(self) -> None:
+        # 避免重复调用：THREAD 模式下多个 job 共享同一 process，
+        # 后续 job 不应重置 session_start，否则旧 job trace 的相对时间会变成负数
+        if self._session_start is not None:
+            return
         self._session_start = time.monotonic()
         self._session_start_wall = time.time()
         SESSION_ACTIVE.inc()
@@ -461,10 +441,15 @@ class MetricsCollector:
                 now = time.monotonic()
                 if trace.asr_end is None:
                     trace.asr_end = now
-                # 如果 asr_start 还没设置（VAD 未触发），则用 asr_end 倒推一个合理值
+                # 如果 asr_start 还没设置（VAD 未触发），则用 ass_end 倒推一个合理值
                 if trace.asr_start is None:
                     trace.asr_start = now - 1.0  # 假设 ASR 耗时约 1s
-                trace.asr_text = text
+                # VAD 会把用户语音切分成多段，每段都会触发 stt_final，
+                # 用拼接而不是覆盖来保留完整内容
+                if trace.asr_text:
+                    trace.asr_text += " " + text
+                else:
+                    trace.asr_text = text
 
     def stt_error(self) -> None:
         ASR_ERROR.inc()
@@ -502,6 +487,20 @@ class MetricsCollector:
     def llm_error(self) -> None:
         ERROR_TOTAL.labels(stage="llm").inc()
 
+    def llm_input(self, text: str) -> None:
+        request_id = self._current_request_id.get()
+        if request_id:
+            trace = self._request_traces.get(request_id)
+            if trace:
+                trace.llm_input = text
+
+    def llm_output(self, text: str) -> None:
+        request_id = self._current_request_id.get()
+        if request_id:
+            trace = self._request_traces.get(request_id)
+            if trace:
+                trace.llm_output += text
+
     def tts_start(self) -> None:
         request_id = self._current_request_id.get()
         if request_id:
@@ -536,6 +535,23 @@ class MetricsCollector:
     # ---- Per-request 时序追踪（新增）----
     def request_start(self, room_id: str, user_id: str) -> str:
         """开始一个请求，返回 request_id"""
+        # 清理同一房间的旧 trace（job restart 时，上一个 job 的 active_request 需要结束）
+        # 旧 job 的 LLM/TTS 回调可能还在异步执行，这些回调会继续写到旧 trace
+        # （找到就写，找不到就静默失败，不影响业务）
+        rs = self._room_stats.get(room_id)
+        if rs and rs.active_request:
+            stale = rs.active_request
+            # 只清理不在 _request_traces 中的（已在别的 job 的 finally 中处理过）
+            if stale.request_id in self._request_traces:
+                stale.status = "interrupted"
+                rs.active_request = None
+                rs.total_requests += 1
+                rs.recent_traces.append(stale)
+                if len(rs.recent_traces) > 10:
+                    rs.recent_traces = rs.recent_traces[-10:]
+                self._request_traces.pop(stale.request_id, None)
+                logger.info(f"[metrics] Cleaned up stale trace {stale.request_id} for room={room_id}")
+
         request_id = str(uuid.uuid4())[:8]
         trace = RequestTrace(
             request_id=request_id,
@@ -552,6 +568,12 @@ class MetricsCollector:
         """请求结束，移出活跃状态"""
         trace = self._request_traces.get(request_id)
         if not trace:
+            # trace 可能已通过其他 request_id 提前移到 recent_traces（如并发 job 互相覆盖）
+            # 检查 room_stats 中是否已有该 request_id 的 trace
+            for rs in self._room_stats.values():
+                for t in rs.recent_traces:
+                    if t.request_id == request_id:
+                        return  # 已记录过，跳过
             return
         trace.status = status
         if trace.room_id in self._room_stats:
@@ -587,7 +609,16 @@ class MetricsCollector:
             trace = self._request_traces.get(request_id)
             if trace:
                 trace.asr_end = time.monotonic()
+                # 每轮对话独立 trace，ASR 结果直接覆盖（不再拼接）
                 trace.asr_text = text
+
+    def asr_interim(self, text: str) -> None:
+        """ASR 中间结果（覆盖而非拼接，用于调试）"""
+        request_id = self._current_request_id.get()
+        if request_id:
+            trace = self._request_traces.get(request_id)
+            if trace:
+                trace.asr_text = text  # 覆盖
 
     def tts_chunk_sent(self, chars: int) -> None:
         """每次 TTS 分片发送时调用"""
@@ -616,16 +647,25 @@ class MetricsCollector:
         if not rs:
             return {
                 "room_id": room_id,
-                "active_request": None,
+                "active_requests": [],
                 "recent_traces": [],
                 "total_requests": 0,
                 "total_errors": 0,
             }
-        recent = rs.recent_traces[-5:] if rs.recent_traces else []
+        # active_requests: 只展示当前 active_request（entrypoint 级别的当前请求）
+        # 不展示 _request_traces 中其他的（那些是旧 job 的 trace，回调可能还在写）
+        all_active = []
+        if rs.active_request and rs.active_request.status == "in_progress":
+            if _is_meaningful_trace(rs.active_request):
+                all_active.append(_trace_to_dict(rs.active_request))
+        # recent_traces: 只展示已结束的 trace（status != in_progress）
+        recent = [t for t in rs.recent_traces if t.status != "in_progress"]
+        recent = recent[-5:]
+        recent = [t for t in recent if _is_meaningful_trace(t)]
         return {
             "room_id": room_id,
-            "active_request": _trace_to_dict(rs.active_request, self._session_start, self._session_start_wall),
-            "recent_traces": [_trace_to_dict(t, self._session_start, self._session_start_wall) for t in recent],
+            "active_requests": all_active,
+            "recent_traces": [_trace_to_dict(t) for t in recent],
             "total_requests": rs.total_requests,
             "total_errors": rs.total_errors,
         }
@@ -640,6 +680,17 @@ class MetricsCollector:
     def get_current_request_id(self) -> str:
         """获取当前上下文的 request_id（供 tts_adapter 等内部调用）"""
         return self._current_request_id.get()
+
+
+def _is_meaningful_trace(t: RequestTrace) -> bool:
+    """判断 trace 是否有实际业务数据（过滤 THREAD 池幽灵条目）"""
+    return bool(
+        t.asr_text
+        or t.asr_start is not None
+        or t.llm_start is not None
+        or t.tts_start is not None
+        or t.status == "error"
+    )
 
 
 # ============================================================

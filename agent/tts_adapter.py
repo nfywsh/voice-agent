@@ -304,7 +304,6 @@ class QwenTTSStream(tts.SynthesizeStream):
                     if metrics:
                         if is_first:
                             metrics.tts_start()
-                        metrics.tts_first_audio()
                     logger.info(f"[QwenTTSStream] TTS chunk {seq} ({chars} chars) done in {done_time - send_time:.3f}s, has_audio={has_audio}, bytes={bytes_sent}")
                     _record_chunk_done(seq, chars, send_time, True, "", bytes_sent)
                     chunk_done_event.set()
@@ -337,7 +336,11 @@ class QwenTTSStream(tts.SynthesizeStream):
                     except asyncio.TimeoutError:
                         # 超时：检查是否所有任务都完成了
                         if not in_flight_tasks:
-                            break
+                            # 重新检查：chunk 可能刚好在超时前被添加
+                            if next_seq not in chunk_buffers:
+                                break  # 确实没有待处理分片，退出
+                            # 否则继续处理刚到达的分片
+                            continue
                         continue
                     if not in_flight_tasks and next_seq not in chunk_buffers:
                         break
@@ -346,6 +349,11 @@ class QwenTTSStream(tts.SynthesizeStream):
                 buf, has_audio = chunk_buffers[next_seq]
                 if buf:
                     output_emitter.push(buf)
+                    output_emitter.flush()
+                    # tts_first_audio 在首次实际输出音频时记录
+                    m = _maybe_metrics()
+                    if m and delivered_thru == -1:
+                        m.tts_first_audio()
                     logger.info(f"[QwenTTSStream] delivered chunk {next_seq}, {len(buf)} bytes")
                 delivered_thru = next_seq
                 # 循环继续处理下一个
@@ -434,6 +442,11 @@ class QwenTTSStream(tts.SynthesizeStream):
             in_flight_tasks.clear()
 
             await output_task
+
+            # 校验：所有分片都已输出
+            final_seq = chunk_seq - 1
+            if delivered_thru < final_seq:
+                logger.warning(f"[QwenTTSStream] Audio chunks lost: delivered {delivered_thru} of {final_seq}")
 
             total_tts_time = time.monotonic() - t0
             logger.info(f"[QwenTTSStream._run] TTS completed, total time: {total_tts_time:.3f}s, bytes: {pcm_bytes_sent}")
