@@ -491,15 +491,30 @@ class VoiceAssistant(Agent):
 
 
 # ============================================================
-# ASR 配置（备选方案）
+# ASR 配置（支持多种后端）
 # ============================================================
 
 def _create_stt():
-    """创建 STT 实例。使用 DashScope Fun-ASR。"""
+    """创建 STT 实例。
+
+    根据环境变量选择后端：
+    - OPENAI_ASR_API_KEY: 使用 OpenAI 格式 ASR (openai_stt.py)
+    - DASHSCOPE_API_KEY: 使用 DashScope Fun-ASR (dashscope_stt.py)
+
+    优先级：OpenAI > DashScope
+    """
+    # 优先使用 OpenAI 格式 ASR
+    openai_asr_key = os.environ.get("OPENAI_ASR_API_KEY", "")
+    if openai_asr_key:
+        from openai_stt import create_stt as create_openai_stt
+        logger.info("Using OpenAI format ASR")
+        return create_openai_stt()
+
+    # 回退到 DashScope Fun-ASR
     api_key = os.environ.get("DASHSCOPE_API_KEY", "")
     if not api_key:
         raise ValueError(
-            "DASHSCOPE_API_KEY is required for DashScope ASR. "
+            "Either OPENAI_ASR_API_KEY or DASHSCOPE_API_KEY is required. "
             "Set it in .env or docker-compose.yml"
         )
     model = os.environ.get("DASHSCOPE_ASR_MODEL", "fun-asr-realtime")
@@ -649,27 +664,36 @@ async def entrypoint(ctx: JobContext):
     # 创建 LLM 适配器（使用独立 API 端点）
     # 注意：openai plugin 必须在主线程注册，所以放在模块顶部 import（THREAD 模式下 entrypoint 运行在主线程）
 
-    llm_api_key = os.environ.get("LLM_API_KEY", "")
-    llm_base_url = os.environ.get(
-        "LLM_BASE_URL", "https://jiajiatemp.duckdns.org:30002/v1/"
-    )
-    llm_model = os.environ.get("LLM_MODEL", "qwen3.5-122b-a10b")
+    # 优先使用 OpenAI 格式 LLM 配置
+    openai_llm_key = os.environ.get("OPENAI_LLM_API_KEY", "")
+    openai_llm_url = os.environ.get("OPENAI_LLM_BASE_URL", "")
+    openai_llm_model = os.environ.get("OPENAI_LLM_MODEL", "")
 
-    if not llm_api_key:
-        raise ValueError(
-            "LLM_API_KEY is required for LLM. "
-            "Set it in .env or docker-compose.yml"
+    if openai_llm_key and openai_llm_url:
+        # 使用 OpenAI 格式 LLM
+        from openai_llm import create_llm as create_openai_llm
+        llm = create_openai_llm()
+        logger.info(f"[entrypoint] Using OpenAI format LLM: base_url={openai_llm_url}, model={openai_llm_model}")
+    else:
+        # 使用原始 LLM 配置
+        llm_api_key = os.environ.get("LLM_API_KEY", "")
+        llm_base_url = os.environ.get(
+            "LLM_BASE_URL", "https://jiajiatemp.duckdns.org:30002/v1/"
         )
+        llm_model = os.environ.get("LLM_MODEL", "qwen3.5-122b-a10b")
 
-    logger.info(f"[entrypoint] LLM config: base_url={llm_base_url}, model={llm_model}")
+        if not llm_api_key:
+            raise ValueError(
+                "Either OPENAI_LLM_API_KEY or LLM_API_KEY is required for LLM. "
+                "Set it in .env or docker-compose.yml"
+            )
 
-    # 创建 LLM 实例
-    # 注意：思考模式参数通过 llm_node 动态传入 extra_kwargs，不再在构造函数设置 extra_body
-    llm = lk_openai.LLM(
-        api_key=llm_api_key,
-        base_url=llm_base_url,
-        model=llm_model,
-    )
+        logger.info(f"[entrypoint] LLM config: base_url={llm_base_url}, model={llm_model}")
+        llm = lk_openai.LLM(
+            api_key=llm_api_key,
+            base_url=llm_base_url,
+            model=llm_model,
+        )
 
     # 获取 room 信息
     room_id = ctx.room.name
@@ -680,24 +704,36 @@ async def entrypoint(ctx: JobContext):
     metrics = _get_metrics()
     metrics.session_start()
 
-    # 创建 TTS 适配器（metrics 必须在之前创建）
-    tts_url = os.environ.get("TTS_SERVICE_URL", "http://localhost:8001")
-    tts_adapter = QwenTTSAdapter(
-        service_url=tts_url,
-        voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
-        timeout=float(os.environ.get("TTS_TIMEOUT", "30")),
-        max_tts_chunk=int(os.environ.get("TTS_MAX_CHUNK", "300")),
-        first_chunk_min=int(os.environ.get("TTS_FIRST_CHUNK_MIN", "30")),
-        metrics=metrics,  # 注入 metrics 用于 TTS 内部上报
-    )
+    # 创建 TTS 适配器（支持 OpenAI 格式和 DashScope 格式）
+    openai_tts_key = os.environ.get("OPENAI_TTS_API_KEY", "")
+    openai_tts_url = os.environ.get("OPENAI_TTS_BASE_URL", "")
 
-    # 创建 VAD
+    if openai_tts_key and openai_tts_url:
+        from openai_tts_adapter import create_tts as create_openai_tts
+        tts_adapter = create_openai_tts()
+        tts_adapter._metrics = metrics
+        logger.info(f"[entrypoint] Using OpenAI format TTS: base_url={openai_tts_url}")
+    else:
+        tts_url = os.environ.get("TTS_SERVICE_URL", "http://localhost:8001")
+        tts_adapter = QwenTTSAdapter(
+            service_url=tts_url,
+            voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
+            timeout=float(os.environ.get("TTS_TIMEOUT", "30")),
+            max_tts_chunk=int(os.environ.get("TTS_MAX_CHUNK", "300")),
+            first_chunk_min=int(os.environ.get("TTS_FIRST_CHUNK_MIN", "30")),
+            metrics=metrics,  # 注入 metrics 用于 TTS 内部上报
+        )
+
+    # 测试 LLM API 连通性
     try:
         import openai
-        oai_client = openai.AsyncOpenAI(api_key=llm_api_key, base_url=llm_base_url)
+        test_api_key = openai_llm_key if openai_llm_key else llm_api_key
+        test_base_url = openai_llm_url if openai_llm_url else llm_base_url
+        test_model = openai_llm_model if openai_llm_model else llm_model
+        oai_client = openai.AsyncOpenAI(api_key=test_api_key, base_url=test_base_url)
         logger.info(f"[entrypoint] Testing LLM API connectivity...")
         resp = await oai_client.chat.completions.create(
-            model=llm_model,
+            model=test_model,
             messages=[{"role": "user", "content": "你好"}],
             max_tokens=10,
         )

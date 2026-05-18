@@ -133,6 +133,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8082:8082"   # metrics 端点 (区别于 LiveKit 内部 8081)
+    extra_hosts:
+      - "host.docker.internal:172.17.1.53"
     environment:
       LIVEKIT_URL: ws://livekit:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
@@ -142,10 +144,23 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
       DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       DASHSCOPE_ASR_MODEL: ${DASHSCOPE_ASR_MODEL:-fun-asr-realtime}
+      # OpenAI 格式 ASR 配置 (可选，与 DashScope ASR 二选一)
+      OPENAI_ASR_BASE_URL: ${OPENAI_ASR_BASE_URL:-}
+      OPENAI_ASR_API_KEY: ${OPENAI_ASR_API_KEY:-}
+      OPENAI_ASR_MODEL: ${OPENAI_ASR_MODEL:-whisper-1}
       # LLM 配置 (独立 API 端点，与 DashScope 分离)
       LLM_BASE_URL: ${LLM_BASE_URL:-https://jiajiatemp.duckdns.org:30002/v1/}
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-qwen3.5-122b-a10b}
+      # OpenAI 格式 LLM 配置 (可选，与上述 LLM 配置二选一)
+      OPENAI_LLM_BASE_URL: ${OPENAI_LLM_BASE_URL:-}
+      OPENAI_LLM_API_KEY: ${OPENAI_LLM_API_KEY:-}
+      OPENAI_LLM_MODEL: ${OPENAI_LLM_MODEL:-gpt-4o}
+      # OpenAI 格式 TTS 配置 (可选)
+      OPENAI_TTS_BASE_URL: ${OPENAI_TTS_BASE_URL:-}
+      OPENAI_TTS_API_KEY: ${OPENAI_TTS_API_KEY:-}
+      OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-tts-1}
+      OPENAI_TTS_VOICE: ${OPENAI_TTS_VOICE:-alloy}
       # 微服务地址
       TTS_SERVICE_URL: http://tts-service:8001
       SINGING_SERVICE_URL: http://singing-service:8002
@@ -175,10 +190,15 @@ services:
         condition: service_healthy
       singing-service:
         condition: service_healthy
+    volumes:
+      - /data/asr-temp:/data/asr-temp:rw
     networks:
       - voice-network
+      - ai_net
     restart: unless-stopped
 
 networks:
   voice-network:
     driver: bridge
+  ai_net:
+    external: true
