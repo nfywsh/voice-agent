@@ -11,7 +11,20 @@ build/
 # Node
 node_modules/
 .next/
+out/
 frontend/dist/
+
+# Backend build
+backend/.next/
+backend/out/
+
+# Services build artifacts
+agent/dist/
+agent/build/
+tts_service/dist/
+tts_service/build/
+singing_service/dist/
+singing_service/build/
 
 # Models (large files, download separately)
 models/Qwen3-TTS/
@@ -30,6 +43,10 @@ nginx/ssl/*.pem
 nginx/ssl/*.key
 nginx/ssl/*.crt
 
+# Claude Code
+.claude/
+.agents/
+
 # IDE
 .vscode/
 .idea/
@@ -43,6 +60,7 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
 # Docker
 docker-compose.override.yml
