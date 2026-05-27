@@ -38,7 +38,7 @@ services:
     networks:
       - voice-network
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/health || exit 1"]
       interval: 15s
       timeout: 3s
       retries: 3
@@ -70,10 +70,12 @@ services:
   # ============ 3. LiveKit Server ============
   livekit:
     image: livekit/livekit-server:v1.11.0
+    # 端口用于容器间通信 + 本地开发直连
+    # 生产环境外部访问通过 nginx:40082/livekit/ 代理
     ports:
       - "7880:7880"
       - "7881:7881"
-      - "${RTC_PORT_START:-50000}-${RTC_PORT_END:-50050}:${RTC_PORT_START:-50000}-${RTC_PORT_END:-50050}/udp"
+      - "${RTC_PORT_START:-41000}-${RTC_PORT_END:-41040}:${RTC_PORT_START:-41000}-${RTC_PORT_END:-41040}/udp"
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
     command: --config /etc/livekit.yaml
@@ -102,6 +104,7 @@ services:
       PORT: "8001"
     networks:
       - voice-network
+      - ai_net
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 15s
@@ -158,11 +161,18 @@ services:
       OPENAI_LLM_BASE_URL: ${OPENAI_LLM_BASE_URL:-}
       OPENAI_LLM_API_KEY: ${OPENAI_LLM_API_KEY:-}
       OPENAI_LLM_MODEL: ${OPENAI_LLM_MODEL:-gpt-4o}
+      # VLLM 专用 LLM（处理 chat_template_kwargs 顶层注入，必须与 OPENAI_LLM_* 配合使用）
+      USE_VLLM_LLM: ${USE_VLLM_LLM:-0}
+      VLLM_CHAT_TEMPLATE_KWARGS: ${VLLM_CHAT_TEMPLATE_KWARGS:-}
       # OpenAI 格式 TTS 配置 (可选)
       OPENAI_TTS_BASE_URL: ${OPENAI_TTS_BASE_URL:-}
       OPENAI_TTS_API_KEY: ${OPENAI_TTS_API_KEY:-}
       OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-tts-1}
       OPENAI_TTS_VOICE: ${OPENAI_TTS_VOICE:-alloy}
+      # Qwen3-TTS-Base 配置
+      QWEN3_TTS_BASE_URL: ${QWEN3_TTS_BASE_URL:-http://host.docker.internal:8021}
+      QWEN3_TTS_REF_AUDIO: ${QWEN3_TTS_REF_AUDIO:-/data/voice-temp/voices/voice_8fe34d12.wav}
+      QWEN3_TTS_REF_TEXT: ${QWEN3_TTS_REF_TEXT:-这是一段参考音色的示例文本}
       # 微服务地址
       TTS_SERVICE_URL: http://tts-service:8001
       SINGING_SERVICE_URL: http://singing-service:8002
@@ -180,6 +190,7 @@ services:
       TTS_MAX_CONCURRENT: ${TTS_MAX_CONCURRENT:-3}
       # 超时配置
       LLM_TIMEOUT: ${LLM_TIMEOUT:-5}
+      QWEN3_TTS_TIMEOUT: ${QWEN3_TTS_TIMEOUT:-120}
       TTS_TIMEOUT: ${TTS_TIMEOUT:-30}
       SINGING_TIMEOUT: ${SINGING_TIMEOUT:-30}
       # LLM 思考模式和聊天历史配置
@@ -194,6 +205,7 @@ services:
         condition: service_healthy
     volumes:
       - /data/asr-temp:/data/asr-temp:rw
+      - /data/voice-temp:/data/voice-temp:rw
     networks:
       - voice-network
       - ai_net
