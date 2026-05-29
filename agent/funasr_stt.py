@@ -11,6 +11,7 @@
 """
 
 import asyncio
+from math import gcd
 import logging
 import os
 import tempfile
@@ -36,10 +37,13 @@ def _resample_to_16k(pcm_bytes: bytes, source_rate: int) -> bytes:
     if source_rate == _ASR_SAMPLE_RATE:
         return pcm_bytes
     audio = np.frombuffer(pcm_bytes, dtype=np.int16)
-    ratio = _ASR_SAMPLE_RATE / source_rate
-    indices = np.arange(0, len(audio), ratio)
-    resampled = np.interp(indices, np.arange(len(audio)), audio).astype(np.int16)
-    return resampled.tobytes()
+    # Use scipy resample_poly for proper rational resampling (handles any rate conversion)
+    from scipy.signal import resample_poly
+    gcd_val = gcd(source_rate, _ASR_SAMPLE_RATE)
+    up = _ASR_SAMPLE_RATE // gcd_val  # e.g., 16000/1000 = 16
+    down = source_rate // gcd_val     # e.g., 24000/1000 = 24
+    resampled = resample_poly(audio.astype(np.float32), up, down)
+    return resampled.astype(np.int16).tobytes()
 
 
 class FunASRSTT(stt.STT):
@@ -103,6 +107,7 @@ class FunASRSTT(stt.STT):
         logger.info(f"[FunASRSTT] Audio buffer: samples={len(audio_np)}, sample_rate={sample_rate}, duration={len(audio_np)/sample_rate:.2f}s, max_amplitude={max_amp}")
 
         pcm_16k = _resample_to_16k(audio_np.tobytes(), sample_rate)
+        logger.info(f"[FunASRSTT] Resampled to 16kHz: {len(pcm_16k)} bytes, {len(pcm_16k)//2//16000:.2f}s")
 
         asr_temp_dir = "/data/asr-temp"
         os.makedirs(asr_temp_dir, exist_ok=True)
@@ -112,8 +117,10 @@ class FunASRSTT(stt.STT):
             wf.setsampwidth(2)
             wf.setframerate(_ASR_SAMPLE_RATE)
             wf.writeframes(pcm_16k)
+        logger.info(f"[FunASRSTT] WAV file written: {tmp_path}, size={os.path.getsize(tmp_path)} bytes")
 
         try:
+            logger.info(f"[FunASRSTT] FunASR request to {self._base_url}: samples={len(audio_np)}, sr={sample_rate}, duration={len(audio_np)/sample_rate:.2f}s")
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     self._base_url,
@@ -134,7 +141,12 @@ class FunASRSTT(stt.STT):
                         )
 
                     result = await resp.json()
-                    text = result.get("text", "")
+                    # FunASR 可能返回空列表或结果（当音频为寂静/空时），安全处理
+                    if not result or "text" not in result:
+                        logger.warning(f"[FunASRSTT] ASR returned empty result: {result}")
+                        text = ""
+                    else:
+                        text = result.get("text", "") or ""
                     logger.info(f"[FunASRSTT] ASR result: '{text}'")
                     return stt.SpeechEvent(
                         type=stt.SpeechEventType.FINAL_TRANSCRIPT,
