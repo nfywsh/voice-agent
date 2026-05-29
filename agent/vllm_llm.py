@@ -142,12 +142,14 @@ class VLLMChatStream(base_llm.LLMStream):
             tool_schemas = self._tool_ctx.parse_function_tools("openai", strict=True)
 
             # Build the request body - chat_template_kwargs at TOP LEVEL (critical for VLLM)
+            # VLLM expects: {"chat_template_kwargs": {"enable_thinking": false}}
+            # NOT: {"enable_thinking": false} directly spread
             body: dict[str, Any] = {
                 "model": self._model,
                 "messages": chat_ctx,
                 "stream": True,
                 "stream_options": {"include_usage": True},
-                **self._chat_template_kwargs,
+                "chat_template_kwargs": dict(self._chat_template_kwargs),
             }
 
             if tool_schemas:

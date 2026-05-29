@@ -109,12 +109,6 @@ class Qwen3TTSChunkedStream(tts.ChunkedStream):
         self._adapter = adapter
 
     async def _run(self, output_emitter: AudioEmitter) -> None:
-        # 去除首尾空白，避免 Base TTS 模型挂起或产生静音
-        input_text = self._input_text.strip()
-        if not input_text:
-            logger.warning("[Qwen3TTSChunkedStream] No text after strip")
-            return
-
         output_emitter.initialize(
             request_id=str(uuid.uuid4()),
             sample_rate=OUTPUT_SAMPLE_RATE,
@@ -131,7 +125,7 @@ class Qwen3TTSChunkedStream(tts.ChunkedStream):
             async with aiohttp.ClientSession(connector=connector) as session:
                 req_body = {
                     "model": "Qwen3-TTS-Base",
-                    "input": input_text,
+                    "input": self._input_text,
                     "response_format": "pcm",
                     "task_type": "Base",
                     "ref_audio": ref_audio,
@@ -212,10 +206,8 @@ class Qwen3TTSStream(tts.SynthesizeStream):
 
             logger.info(f"[Qwen3TTSStream] _input_ch exhausted: items={item_count}, pending_text len={len(pending_text)}")
 
-            # 去除首尾空白，避免 Base TTS 模型挂起
-            pending_text = pending_text.strip()
-            if not pending_text:
-                logger.warning("[Qwen3TTSStream] No text after strip, returning")
+            if not pending_text.strip():
+                logger.warning("[Qwen3TTSStream] No text accumulated, returning")
                 return
 
             m = _maybe_metrics()
@@ -229,9 +221,10 @@ class Qwen3TTSStream(tts.SynthesizeStream):
                     "response_format": "pcm",
                     "task_type": "Base",
                     "ref_audio": ref_audio,
-                    "ref_text": self._adapter._ref_text,
+                    "ref_text": pending_text,  # Must match input text for correct cloning
+                    "x_vector_only_mode": True,  # Fast mode
                 }
-                logger.info(f"[Qwen3TTSStream] Sending TTS: Base mode, text_len={len(pending_text)}, base_url={self._adapter._base_url}")
+                logger.info(f"[Qwen3TTSStream] Sending TTS: text_len={len(pending_text)}, base_url={self._adapter._base_url}")
 
                 async with session.post(
                     f"{self._adapter._base_url}/v1/audio/speech",
@@ -248,15 +241,18 @@ class Qwen3TTSStream(tts.SynthesizeStream):
                     first_audio_sent = False
                     async for chunk_data in resp.content.iter_chunked(4096):
                         buffer += chunk_data
-                        if len(buffer) >= 3840:
-                            resampled = _resample(buffer, TTS_SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
+                        # Process in 4096-byte chunks to avoid byte misalignment
+                        while len(buffer) >= 4096:
+                            chunk = buffer[:4096]
+                            buffer = buffer[4096:]
+                            resampled = _resample(chunk, TTS_SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
                             output_emitter.push(resampled)
                             output_emitter.flush()
                             pcm_bytes_sent += len(resampled)
                             if m and not first_audio_sent:
                                 m.tts_first_audio()
                                 first_audio_sent = True
-                            buffer = b""
+                    # Process remaining bytes (< 4096)
                     if buffer:
                         resampled = _resample(buffer, TTS_SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
                         output_emitter.push(resampled)
