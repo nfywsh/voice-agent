@@ -1,20 +1,14 @@
 # agent/qwen3_tts_adapter.py
-"""Qwen3-TTS-Base 适配器
+"""Qwen3-TTS-Base 适配器 — 流式直接克隆
 
-VLLM 部署的 Qwen3-TTS-Base，本地路径 172.17.1.53:8021
-
-必须参数:
-  - task_type: "Base"
-  - ref_audio: 参考音频 (base64 data URL)
-  - ref_text: 参考音频转写文本
+每次 TTS 请求用 Qwen3-TTS-Base + ref_audio 做声音克隆，流式输出 PCM。
+不需要声纹注册，ref_audio + ref_text 每次直接传给 Base 模型。
 
 通过环境变量配置:
-  QWEN3_TTS_BASE_URL: API 基地址 (默认 http://172.17.1.53:8021)
+  QWEN3_TTS_BASE_URL: API 基地址 (默认 http://host.docker.internal:8021)
   QWEN3_TTS_REF_AUDIO: 参考音频路径 (默认 /data/voice-temp/voices/voice_8fe34d12.wav)
   QWEN3_TTS_REF_TEXT: 参考音频转写 (默认 "这是一段参考音色的示例文本")
-  QWEN3_TTS_TIMEOUT: 请求超时秒数 (默认 30)
-  OPENAI_TTS_MAX_CHUNK: 最大分片字符数 (默认 300)
-  OPENAI_TTS_FIRST_CHUNK_MIN: 首片最小字符数 (默认 30)
+  QWEN3_TTS_TIMEOUT: 请求超时秒数 (默认 120)
 """
 
 import asyncio
@@ -68,12 +62,10 @@ def _load_ref_audio_base64(path: str) -> Optional[str]:
 class Qwen3TTSAdapter(tts.TTS):
     def __init__(
         self,
-        base_url: str = "http://172.17.1.53:8021",
+        base_url: str = "http://host.docker.internal:8021",
         ref_audio_path: str = DEFAULT_REF_AUDIO_PATH,
         ref_text: str = DEFAULT_REF_TEXT,
-        timeout: float = 30.0,
-        max_tts_chunk: int = 300,
-        first_chunk_min: int = 30,
+        timeout: float = 120.0,
         metrics: "MetricsCollector" = None,
     ):
         super().__init__(
@@ -85,8 +77,6 @@ class Qwen3TTSAdapter(tts.TTS):
         self._ref_audio_path = ref_audio_path
         self._ref_text = ref_text
         self._timeout = timeout
-        self._max_tts_chunk = max_tts_chunk
-        self._first_chunk_min = first_chunk_min
         self._metrics = metrics
         self._ref_audio_b64: Optional[str] = None
 
@@ -119,6 +109,12 @@ class Qwen3TTSChunkedStream(tts.ChunkedStream):
         self._adapter = adapter
 
     async def _run(self, output_emitter: AudioEmitter) -> None:
+        # 去除首尾空白，避免 Base TTS 模型挂起或产生静音
+        input_text = self._input_text.strip()
+        if not input_text:
+            logger.warning("[Qwen3TTSChunkedStream] No text after strip")
+            return
+
         output_emitter.initialize(
             request_id=str(uuid.uuid4()),
             sample_rate=OUTPUT_SAMPLE_RATE,
@@ -129,19 +125,21 @@ class Qwen3TTSChunkedStream(tts.ChunkedStream):
         if not ref_audio:
             logger.error("[Qwen3TTSAdapter] No ref_audio available")
             return
+
         connector = aiohttp.TCPConnector(ssl=False)
         try:
             async with aiohttp.ClientSession(connector=connector) as session:
+                req_body = {
+                    "model": "Qwen3-TTS-Base",
+                    "input": input_text,
+                    "response_format": "pcm",
+                    "task_type": "Base",
+                    "ref_audio": ref_audio,
+                    "ref_text": self._adapter._ref_text,
+                }
                 async with session.post(
                     f"{self._adapter._base_url}/v1/audio/speech",
-                    json={
-                        "model": "Qwen3-TTS-Base",
-                        "input": self._input_text,
-                        "response_format": "pcm",
-                        "task_type": "Base",
-                        "ref_audio": ref_audio,
-                        "ref_text": self._adapter._ref_text,
-                    },
+                    json=req_body,
                     headers={"Authorization": "Bearer placeholder"},
                     timeout=aiohttp.ClientTimeout(total=self._adapter._timeout),
                 ) as resp:
@@ -172,9 +170,6 @@ class Qwen3TTSStream(tts.SynthesizeStream):
         self._adapter = adapter
 
     async def _run(self, output_emitter: AudioEmitter) -> None:
-        import time
-
-        t0 = time.monotonic()
         logger.info("[Qwen3TTSStream._run] started")
 
         output_emitter.initialize(
@@ -191,7 +186,8 @@ class Qwen3TTSStream(tts.SynthesizeStream):
             logger.error("[Qwen3TTSStream] No ref_audio available, cannot synthesize")
             return
 
-        logger.info(f"[Qwen3TTSStream] ref_audio loaded: {len(ref_audio)} chars")
+        logger.info(f"[Qwen3TTSStream] Using Base mode with ref_audio: {len(ref_audio)} chars")
+
         connector = aiohttp.TCPConnector(ssl=False)
         session = aiohttp.ClientSession(connector=connector)
 
@@ -202,47 +198,44 @@ class Qwen3TTSStream(tts.SynthesizeStream):
         pcm_bytes_sent = 0
         item_count = 0
 
-        logger.info(f"[Qwen3TTSStream] _input_ch type: {type(self._input_ch)}, waiting for text...")
-
         try:
             async for item in self._input_ch:
                 item_count += 1
-                if item_count <= 5:
-                    logger.info(f"[Qwen3TTSStream] item {item_count}: type={type(item).__name__}, value={repr(item)[:80]}")
-
                 if isinstance(item, str):
                     pending_text += item
                 elif item is None:
                     continue
                 else:
-                    # FlushSentinel or other - try to flush what we have
                     if pending_text:
-                        logger.info(f"[Qwen3TTSStream] Sentinel received after {item_count} items, pending_text len={len(pending_text)}")
+                        logger.info(f"[Qwen3TTSStream] Sentinel after {item_count} items, pending_text len={len(pending_text)}")
                         break
 
-            logger.info(f"[Qwen3TTSStream] _input_ch exhausted: items={item_count}, pending_text='{pending_text[:100]}...'")
+            logger.info(f"[Qwen3TTSStream] _input_ch exhausted: items={item_count}, pending_text len={len(pending_text)}")
 
-            if not pending_text.strip():
-                logger.warning("[Qwen3TTSStream] No text accumulated, returning")
+            # 去除首尾空白，避免 Base TTS 模型挂起
+            pending_text = pending_text.strip()
+            if not pending_text:
+                logger.warning("[Qwen3TTSStream] No text after strip, returning")
                 return
 
-            # Send the full pending_text to TTS in one request
-            logger.info(f"[Qwen3TTSStream] Sending single TTS request for {len(pending_text)} chars")
             m = _maybe_metrics()
             if m:
                 m.tts_start()
 
             try:
+                req_body = {
+                    "model": "Qwen3-TTS-Base",
+                    "input": pending_text,
+                    "response_format": "pcm",
+                    "task_type": "Base",
+                    "ref_audio": ref_audio,
+                    "ref_text": self._adapter._ref_text,
+                }
+                logger.info(f"[Qwen3TTSStream] Sending TTS: Base mode, text_len={len(pending_text)}, base_url={self._adapter._base_url}")
+
                 async with session.post(
                     f"{self._adapter._base_url}/v1/audio/speech",
-                    json={
-                        "model": "Qwen3-TTS-Base",
-                        "input": pending_text,
-                        "response_format": "pcm",
-                        "task_type": "Base",
-                        "ref_audio": ref_audio,
-                        "ref_text": self._adapter._ref_text,
-                    },
+                    json=req_body,
                     headers={"Authorization": "Bearer placeholder"},
                     timeout=aiohttp.ClientTimeout(total=self._adapter._timeout),
                 ) as resp:
@@ -281,8 +274,6 @@ class Qwen3TTSStream(tts.SynthesizeStream):
             except Exception as e:
                 logger.error(f"Qwen3TTS synthesis error: {e}")
 
-        except asyncio.TimeoutError:
-            logger.error(f"Qwen3TTS stream timed out after {self._adapter._timeout}s")
         except Exception as e:
             logger.error(f"Qwen3TTS stream error: {e}")
         finally:
@@ -294,12 +285,10 @@ class Qwen3TTSStream(tts.SynthesizeStream):
 
 
 def create_tts() -> tts.TTS:
-    base_url = os.environ.get("QWEN3_TTS_BASE_URL", "http://172.17.1.53:8021")
+    base_url = os.environ.get("QWEN3_TTS_BASE_URL", "http://host.docker.internal:8021")
     ref_audio_path = os.environ.get("QWEN3_TTS_REF_AUDIO", DEFAULT_REF_AUDIO_PATH)
     ref_text = os.environ.get("QWEN3_TTS_REF_TEXT", DEFAULT_REF_TEXT)
-    timeout = float(os.environ.get("QWEN3_TTS_TIMEOUT", "30"))
-    max_tts_chunk = int(os.environ.get("OPENAI_TTS_MAX_CHUNK", "300"))
-    first_chunk_min = int(os.environ.get("OPENAI_TTS_FIRST_CHUNK_MIN", "30"))
+    timeout = float(os.environ.get("QWEN3_TTS_TIMEOUT", "120"))
 
     logger.info(f"Creating Qwen3TTS adapter: base_url={base_url}, ref_audio={ref_audio_path}")
     return Qwen3TTSAdapter(
@@ -307,6 +296,4 @@ def create_tts() -> tts.TTS:
         ref_audio_path=ref_audio_path,
         ref_text=ref_text,
         timeout=timeout,
-        max_tts_chunk=max_tts_chunk,
-        first_chunk_min=first_chunk_min,
     )

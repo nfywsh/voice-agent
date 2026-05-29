@@ -314,16 +314,12 @@ class VoiceAssistant(Agent):
         room_id = getattr(self, '_room_id', None) or (session_room.name if session_room else "default_room")
         # user_id 同样使用 entrypoint 传入的值
         user_id = getattr(self, '_user_id', None) or f"agent_{room_id}"
+        # 构建 chat_template_kwargs 顶层参数（VLLM 只识别顶层，不识别 extra_body 包装）
+        # DashScope 格式也放在顶层，与 vllm_llm.py 保持一致
         is_thinking = get_thinking_mode(room_id, user_id)
-
-        # 根据思考模式构建 extra_kwargs
-        # DashScope 使用 extra_body.chat_template_kwargs.enable_thinking
+        # VLLM recognizes chat_template_kwargs at TOP LEVEL (NOT extra_body wrapped)
         extra_kwargs = {
-            "extra_body": {
-                "chat_template_kwargs": {
-                    "enable_thinking": is_thinking
-                }
-            }
+            "chat_template_kwargs": {"enable_thinking": is_thinking}
         }
 
         import time
@@ -788,12 +784,11 @@ async def entrypoint(ctx: JobContext):
 
     # 开始 per-request 时序追踪（必须在 session.start() 之前，确保回调能访问到 active request）
     request_id = metrics.request_start(room_id, user_id)
-    agent._request_id = request_id  # 仅用于 llm_node 中查找当前 request_id（llm_node 是同步闭包）
-    # 捕获到本地变量防止 finally 中读取时被后续 job 覆盖
+    agent._request_id = request_id
     _this_request_id = request_id
     logger.info(f"[entrypoint] Request {request_id} started for room={room_id}")
 
-    # 创建 AgentSession（必须在注册回调之前，因为回调需要 session 对象）
+    # 创建 AgentSession
     session = AgentSession(
         vad=vad,
         stt=stt,
@@ -801,7 +796,7 @@ async def entrypoint(ctx: JobContext):
         tts=tts_adapter,
     )
 
-    # 从 session_params 注入参考音色（用于 Qwen3-TTS-Base）
+    # 从 session_params 注入参考音色（Qwen3-TTS-Base 直接克隆，流式输出）
     if session_params:
         ref_audio_path = session_params.get("ref_audio_path")
         ref_text = session_params.get("ref_text")

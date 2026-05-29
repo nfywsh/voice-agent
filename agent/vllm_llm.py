@@ -82,9 +82,14 @@ class VLLMLLM(base_llm.LLM):
             conn_options = DEFAULT_API_CONNECT_OPTIONS
 
         # 从 extra_kwargs 合并动态的 chat_template_kwargs（如思考模式切换）
-        # agent.py llm_node 通过 extra_kwargs={"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
+        # agent.py llm_node 通过 extra_kwargs={"chat_template_kwargs": {"enable_thinking": True}}
+        # 也支持 extra_body.chat_template_kwargs 格式
         merged_chat_tpl = dict(self._chat_template_kwargs)
         if extra_kwargs:
+            # 优先取顶层 chat_template_kwargs（VLLM 直接识别）
+            if "chat_template_kwargs" in extra_kwargs:
+                merged_chat_tpl.update(extra_kwargs["chat_template_kwargs"])
+            # 也兼容 extra_body.chat_template_kwargs 格式
             eb = extra_kwargs.get("extra_body", {})
             if isinstance(eb, dict) and "chat_template_kwargs" in eb:
                 merged_chat_tpl.update(eb["chat_template_kwargs"])
