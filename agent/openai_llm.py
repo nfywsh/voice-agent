@@ -8,11 +8,13 @@
   OPENAI_LLM_BASE_URL: API 基地址 (默认 https://api.openai.com/v1)
   OPENAI_LLM_API_KEY: API 密钥
   OPENAI_LLM_MODEL: 模型名 (默认 gpt-4o)
+  OPENAI_LLM_EXTRA_BODY: 额外 body 参数 JSON（用于 chat_template_kwargs 等顶层参数）
 
 Docker 网络内直接通过服务名访问:
   - VLLM 服务: http://vllm:8000/v1/chat/completions
 """
 
+import json
 import logging
 import os
 
@@ -47,11 +49,21 @@ def create_llm() -> lk_openai.LLM:
 
     timeout = float(os.environ.get("OPENAI_LLM_TIMEOUT", "120"))
 
-    logger.info(f"Creating OpenAI LLM: base_url={base_url}, model={model}")
+    # 解析 extra_body（用于 chat_template_kwargs 等参数）
+    extra_body_raw = os.environ.get("OPENAI_LLM_EXTRA_BODY", "")
+    extra_body = None
+    if extra_body_raw:
+        try:
+            extra_body = json.loads(extra_body_raw)
+        except Exception as e:
+            logger.warning(f"[openai_llm] Failed to parse OPENAI_LLM_EXTRA_BODY: {e}")
+
+    logger.info(f"Creating OpenAI LLM: base_url={base_url}, model={model}, extra_body={extra_body}")
 
     return lk_openai.LLM(
         api_key=api_key,
         base_url=base_url,
         model=model,
-        http_client=None,  # 使用默认 Client
+        http_client=None,
+        extra_body=extra_body,
     )

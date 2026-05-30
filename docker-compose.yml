@@ -50,12 +50,17 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    extra_hosts:
+      - "host.docker.internal:172.17.1.53"
+    volumes:
+      - /data/voice-temp:/data/voice-temp:ro
     environment:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       LIVEKIT_HOST: http://livekit:7880
       HOST: "0.0.0.0"
       PORT: "3000"
+      QWEN3_TTS_BASE_URL: ${QWEN3_TTS_BASE_URL:-http://host.docker.internal:8021}
     networks:
       - voice-network
     healthcheck:
@@ -169,13 +174,14 @@ services:
       OPENAI_TTS_API_KEY: ${OPENAI_TTS_API_KEY:-}
       OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-tts-1}
       OPENAI_TTS_VOICE: ${OPENAI_TTS_VOICE:-alloy}
-      # Qwen3-TTS-Base 配置
+      # Qwen3-TTS-Base 配置 (本地 VLLM，直连 8021)
       QWEN3_TTS_BASE_URL: ${QWEN3_TTS_BASE_URL:-http://host.docker.internal:8021}
       QWEN3_TTS_REF_AUDIO: ${QWEN3_TTS_REF_AUDIO:-/data/voice-temp/voices/voice_8fe34d12.wav}
       QWEN3_TTS_REF_TEXT: ${QWEN3_TTS_REF_TEXT:-这是一段参考音色的示例文本}
       # 微服务地址
       TTS_SERVICE_URL: http://tts-service:8001
       SINGING_SERVICE_URL: http://singing-service:8002
+      SING_AGENT_URL: http://sing_agent:8080
       # System Prompt
       SYSTEM_PROMPT: ${SYSTEM_PROMPT:-}
       PROMPT_SERVICE_URL: ${PROMPT_SERVICE_URL:-}

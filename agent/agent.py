@@ -59,7 +59,7 @@ from livekit.agents import (
 from livekit.plugins import silero
 
 from dashscope_stt import DashScopeSTT
-from singing_handler import SingingHandler
+from singing_handler import SingingHandler, _resample_24k_to_48k
 from tts_adapter import QwenTTSAdapter
 from monitoring.metrics import MetricsCollector
 from livekit.plugins import openai as lk_openai
@@ -169,7 +169,14 @@ _DEFAULT_SYSTEM_PROMPT = (
     "你是一个友好、热情的语音助手，具有唱歌能力。\n"
     "## 工具调用规范\n"
     "- 仅在用户明确表达意图时调用工具\n"
-    "- 唱歌时，你需要根据用户要求创作歌词，格式为每行 'Speaker 1: 歌词内容'\n"
+    "- 唱歌时，你需要根据用户要求创作歌词，格式为 LRC 带时间戳：\n"
+    "  [start]\n"
+    "  [intro]\n"
+    "  [00:00.00][verse]\n"
+    "  歌词内容第一句\n"
+    "  [00:00.05][verse]\n"
+    "  歌词内容第二句\n"
+    "  （注：[start] 和 [intro] 标记结构，[00:xx.xx] 为时间戳，[verse] 为行标签，可选 rap/melodic/chorus 等）\n"
     "- 工具调用返回后，给出简短的过渡语，不要重复工具返回的文本\n"
     "## 对话风格\n"
     "- 回复简洁自然，适合语音播报\n"
@@ -373,23 +380,242 @@ class VoiceAssistant(Agent):
     # ============================================================
 
     @function_tool
-    async def sing_a_song(self, title: str, lyrics: str, style: str = "流行") -> str:
-        """当用户要求唱歌时调用此工具。工具会根据歌词生成旋律并演唱。
+    async def sing_a_song(self, title: str = "", lyrics: str = "", style: str = "流行") -> str:
+        """当用户要求唱歌时调用此工具。
+
+        歌词格式（LRC 带时间戳）：
+        [start]
+        [intro]
+        [00:00.00][verse]
+        歌词内容第一句
+        [00:00.05][verse]
+        歌词内容第二句
+
+        决策逻辑：
+        - lyrics 为空（简单请求如"唱首歌"）→ 随机歌曲 + 音色转换（快速）
+        - lyrics 有内容（复杂请求如"唱一首关于...的歌"）→ /sing/generate 创作（较慢）
 
         Args:
-            title: 歌曲名称
-            lyrics: 歌词全文，使用换行符分隔每句歌词，每句格式为 'Speaker 1: 歌词内容'
+            title: 歌曲名称（可选，为空则使用即兴歌曲）
+            lyrics: LRC 格式歌词（可选，为空则使用随机歌曲 + 音色转换）
             style: 歌曲风格，如流行、民谣、摇滚等
         """
-        logger.info(f"[sing_a_song] title={title}, style={style}, lyrics_len={len(lyrics)}")
+        room_id = getattr(self, '_room_id', None) or "default"
+        logger.info(f"[sing_a_song] title={title}, style={style}, lyrics_len={len(lyrics)}, room={room_id}")
 
-        # 异步启动歌声生成并推流到 LiveKit
-        # 注意：Agent 框架会自动将此工具的返回值作为 LLM 消息
-        # 歌声音频推流在 _push_singing_audio 中处理
-        asyncio.create_task(
-            self._push_singing_audio(title=title, lyrics=lyrics, style=style)
-        )
-        return f"正在演唱《{title}》，风格：{style}"
+        SING_AGENT_URL = os.environ.get("SING_AGENT_URL", "http://localhost:8080")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                if not lyrics:
+                    # 简单请求：随机歌曲 + 音色转换（快速路径）
+                    async with session.get(
+                        f"{SING_AGENT_URL}/sing/random-song",
+                        timeout=aiohttp.ClientTimeout(total=10.0),
+                    ) as resp:
+                        if not resp.ok:
+                            logger.error(f"[sing_a_song] Failed to get random song: {resp.status}")
+                            return "抱歉，暂时没有可用的歌曲。"
+                        data = await resp.json()
+                        song_path = data.get("song_path")
+                        logger.info(f"[sing_a_song] Random song: {song_path}")
+
+                    voice_path = await self._get_room_voice_path(room_id)
+
+                    if not voice_path:
+                        asyncio.create_task(self._play_song_file(song_path))
+                        return "正在播放随机歌曲"
+
+                    async with session.post(
+                        f"{SING_AGENT_URL}/sing/convert-direct",
+                        json={
+                            "song_path": song_path,
+                            "voice_path": voice_path,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=60.0),
+                    ) as resp:
+                        if not resp.ok:
+                            logger.error(f"[sing_a_song] Convert failed: {resp.status}")
+                            return "音色转换失败，播放原歌曲。"
+                        result = await resp.json()
+                        result_path = result.get("result_path")
+                        logger.info(f"[sing_a_song] Converted song file: {result_path}")
+                        asyncio.create_task(self._play_song_file(result_path))
+                        return "正在用你的音色演绎歌曲"
+                else:
+                    # 复杂请求：尝试 /sing/generate 创作歌曲，失败则 fallback 到简单路径
+                    voice_path = await self._get_room_voice_path(room_id)
+
+                    payload = {
+                        "lyrics": lyrics,
+                        "style": style,
+                        "model_type": "acestep",
+                        "duration": 90,
+                    }
+                    if voice_path:
+                        payload["voice_path"] = voice_path
+
+                    generate_failed = False
+                    async with session.post(
+                        f"{SING_AGENT_URL}/sing/generate",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=120.0),
+                    ) as resp:
+                        if not resp.ok:
+                            logger.error(f"[sing_a_song] Generate failed: {resp.status}, falling back to random-song")
+                            generate_failed = True
+                        else:
+                            result = await resp.json()
+                            song_path = result.get("song_path") or result.get("vocal_path")
+                            logger.info(f"[sing_a_song] Generated song file: {song_path}")
+                            asyncio.create_task(self._play_song_file(song_path))
+                            return f"正在演唱《{title or '即兴歌曲'}》，风格：{style}"
+
+                    # Fallback: generate 失败时，使用随机歌曲 + 音色转换
+                    if generate_failed:
+                        logger.info(f"[sing_a_song] Falling back to random-song + convert-direct")
+                        async with session.get(
+                            f"{SING_AGENT_URL}/sing/random-song",
+                            timeout=aiohttp.ClientTimeout(total=10.0),
+                        ) as resp:
+                            if not resp.ok:
+                                logger.error(f"[sing_a_song] Fallback random-song failed: {resp.status}")
+                                return "抱歉，暂时没有可用的歌曲。"
+                            data = await resp.json()
+                            fallback_song_path = data.get("song_path")
+                            logger.info(f"[sing_a_song] Fallback random song: {fallback_song_path}")
+
+                        if voice_path:
+                            async with session.post(
+                                f"{SING_AGENT_URL}/sing/convert-direct",
+                                json={
+                                    "song_path": fallback_song_path,
+                                    "voice_path": voice_path,
+                                },
+                                timeout=aiohttp.ClientTimeout(total=60.0),
+                            ) as resp:
+                                if not resp.ok:
+                                    logger.error(f"[sing_a_song] Fallback convert failed: {resp.status}")
+                                    asyncio.create_task(self._play_song_file(fallback_song_path))
+                                    return "音色转换失败，播放原歌曲。"
+                                result = await resp.json()
+                                result_path = result.get("result_path")
+                                logger.info(f"[sing_a_song] Fallback converted song file: {result_path}")
+                                asyncio.create_task(self._play_song_file(result_path))
+                                return f"正在用你的音色演绎《{title or '即兴歌曲'}》"
+                        else:
+                            asyncio.create_task(self._play_song_file(fallback_song_path))
+                            return "正在播放随机歌曲"
+
+        except asyncio.CancelledError:
+            return "已取消唱歌"
+        except Exception as e:
+            logger.error(f"[sing_a_song] Error: {e}")
+            return f"唱歌功能出现异常: {str(e)}"
+
+    async def _get_room_voice_path(self, room_id: str) -> Optional[str]:
+        """获取room对应的音色文件路径，优先用 agent 入房时缓存的，无则查 backend"""
+        # 优先用 entrypoint 入房时缓存的 ref_audio_path
+        cached = getattr(self, '_ref_audio_path', None)
+        if cached:
+            logger.info(f"[_get_room_voice_path] using cached ref_audio_path: {cached}")
+            return cached
+        # Fallback: 查 backend session
+        backend_url = os.environ.get("BACKEND_URL", "http://backend:3000")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{backend_url}/api/session/params?room={room_id}",
+                    timeout=aiohttp.ClientTimeout(total=3.0),
+                ) as resp:
+                    if resp.ok:
+                        data = await resp.json()
+                        voice_path = data.get("ref_audio_path")
+                        logger.info(f"[_get_room_voice_path] session_data={data}")
+                        if voice_path:
+                            return voice_path
+                    else:
+                        logger.warning(f"[_get_room_voice_path] HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"[_get_room_voice_path] {e}")
+        # 最后 fallback: 环境变量默认音色
+        default_voice = os.environ.get("QWEN3_TTS_REF_AUDIO", "")
+        if default_voice:
+            logger.info(f"[_get_room_voice_path] using env default: {default_voice}")
+            return default_voice
+        return None
+
+    async def _play_song_file(self, file_path: str) -> None:
+        """播放本地歌曲文件（支持 MP3/WAV 等格式，重采样到 48kHz 后推流到 LiveKit）"""
+        try:
+            import av
+            audio_source = rtc.AudioSource(sample_rate=48000, num_channels=1)
+            track = rtc.LocalAudioTrack.create_audio_track("song-audio", audio_source)
+
+            # 获取 room 并发布轨道
+            # AgentSession → room_io.room (AgentSession 没有直接 room 属性)
+            logger.info(f"[_play_song_file] self={id(self)}, session={id(getattr(self, 'session', None))}")
+            session = getattr(self, 'session', None)
+            room_io = getattr(session, 'room_io', None) if session else None
+            room = getattr(room_io, 'room', None) if room_io else None
+            logger.info(f"[_play_song_file] room_io={id(room_io)}, room={id(room)}, local_participant={id(getattr(room, 'local_participant', None)) if room else None}")
+            if room:
+                publication = await room.local_participant.publish_track(track)
+                track_sid = publication.sid
+                logger.info(f"[_play_song_file] Published track for: {file_path}, sid={track_sid}")
+            else:
+                logger.warning(f"[_play_song_file] No room available, audio won't be heard")
+                return
+
+            # 使用 PyAV 解码任意格式音频
+            input_container = av.open(file_path)
+            input_stream = input_container.streams.audio[0]
+            input_stream.thread_type = 'AUTO'
+
+            source_rate = input_stream.rate
+            total_frames = 0
+            logger.info(f"[_play_song_file] Playing: {file_path} @ {source_rate}Hz, format={input_stream.format.name}")
+
+            # 24kHz->48kHz: 2048 samples = 2048*2/24000 = 85.3ms per frame -> resample后 = 4096 samples
+            # 分段发送，每段 20ms @ 48kHz = 960 samples = 1920 bytes
+            chunk_samples = 960  # 20ms @ 48kHz mono
+            resampled_48k = _resample_24k_to_48k
+            pending = b""
+            for packet in input_container.demux(input_stream):
+                for frame in packet.decode():
+                    # 重采样到 48kHz mono 16bit
+                    audio_np = frame.to_ndarray()
+                    if audio_np.ndim == 2:
+                        if audio_np.shape[0] == 1:
+                            audio_np = audio_np[0]
+                        else:
+                            audio_np = audio_np.mean(axis=0).astype(np.int16)
+                    pcm_bytes = audio_np.tobytes()
+                    pcm_48k = resampled_48k(pcm_bytes, source_rate, 48000)
+                    pending += pcm_48k
+                    # 累积到 20ms 一段再发送
+                    while len(pending) >= chunk_samples * 2:
+                        segment = pending[:chunk_samples * 2]
+                        pending = pending[chunk_samples * 2:]
+                        frame_out = rtc.AudioFrame(
+                            data=segment,
+                            sample_rate=48000,
+                            num_channels=1,
+                            samples_per_channel=chunk_samples,
+                        )
+                        await audio_source.capture_frame(frame_out)
+                        total_frames += 1
+
+            input_container.close()
+            logger.info(f"[_play_song_file] Total frames sent: {total_frames}, duration: {total_frames * 0.02:.1f}s")
+            await room.local_participant.unpublish_track(track_sid)
+            await audio_source.aclose()
+            logger.info(f"[_play_song_file] Finished: {file_path}")
+
+        except asyncio.CancelledError:
+            logger.info(f"[_play_song_file] Cancelled: {file_path}")
+        except Exception as e:
+            logger.error(f"[_play_song_file] Error: {e}")
 
     @function_tool
     async def get_weather(self, city: str) -> str:
@@ -781,6 +1007,15 @@ async def entrypoint(ctx: JobContext):
     agent._room_id = room_id  # 注入 room_id（用于 llm_node 中查找思考模式）
     agent._user_id = user_id  # 注入 user_id
     agent._pending_chat_history = _pending_chat_history
+
+    # 存储音色路径（从 session params 或环境变量获取，供 sing_a_song 直接使用）
+    ref_audio_path = None
+    if session_params:
+        ref_audio_path = session_params.get("ref_audio_path")
+    if not ref_audio_path:
+        ref_audio_path = os.environ.get("QWEN3_TTS_REF_AUDIO", "")
+    agent._ref_audio_path = ref_audio_path
+    logger.info(f"[entrypoint] ref_audio_path for room={room_id}: {ref_audio_path!r}")
 
     # 开始 per-request 时序追踪（必须在 session.start() 之前，确保回调能访问到 active request）
     request_id = metrics.request_start(room_id, user_id)

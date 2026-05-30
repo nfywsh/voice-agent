@@ -129,6 +129,12 @@ class VLLMChatStream(base_llm.LLMStream):
         self._api_key = api_key
         self._base_url = base_url
         self._tool_ctx = base_llm.ToolContext(tools)
+        # Accumulate tool call data across chunks (VLLM sends name/arguments across multiple SSE chunks)
+        self._tool_call_buffer: list[dict] = []
+        self._current_func_name: str = ""
+        self._current_func_args: str = ""
+        self._current_call_id: str = ""
+        self._func_index: int = 0
 
     async def _run(self) -> None:
         self._oai_stream: Any = None
@@ -208,7 +214,18 @@ class VLLMChatStream(base_llm.LLMStream):
             raise agents_exc.APIConnectionError(retryable=retryable) from e
 
     def _parse_sse_chunk(self, chunk_data: dict) -> base_llm.ChatChunk | None:
-        """Parse VLLM SSE chunk into ChatChunk."""
+        """Parse VLLM SSE chunk into ChatChunk.
+
+        VLLM streams tool calls across multiple SSE chunks:
+        - Chunk 1: {"index": 0, "id": "call_xxx", "function": {"name": "get_weather"}}
+        - Chunk 2: {"index": 0, "function": {"arguments": "{"}}
+        - Chunk 3: {"index": 0, "function": {"arguments": '"city": '}}
+        - Chunk 4: {"index": 0, "function": {"arguments": '"北京"}'}
+        - Chunk 5: {"index": 0, "function": {"arguments": '"}'}
+
+        We accumulate in _current_func_name and _current_func_args until the
+        tool call is complete (identified by '}' in arguments).
+        """
         try:
             choices = chunk_data.get("choices", [])
             if not choices:
@@ -221,29 +238,98 @@ class VLLMChatStream(base_llm.LLMStream):
             # Handle content delta
             content = delta.get("content", "") or ""
 
-            # Handle tool calls
-            tool_calls = delta.get("tool_calls", [])
-            if tool_calls:
-                # Process tool calls
-                fn_tool_calls = []
-                for tc in tool_calls:
+            # Handle tool calls (may be spread across multiple SSE chunks)
+            tool_calls_delta = delta.get("tool_calls", [])
+            if tool_calls_delta:
+                for tc in tool_calls_delta:
                     func = tc.get("function", {})
-                    fn_tool_calls.append(base_llm.FunctionToolCall(
-                        name=func.get("name", ""),
-                        arguments=func.get("arguments", ""),
-                        call_id=tc.get("id", ""),
-                    ))
-                if fn_tool_calls:
+                    call_id = tc.get("id", "")
+                    func_name = func.get("name", "") or ""
+                    func_args = func.get("arguments", "") or ""
+
+                    # If we receive a new call_id, the previous tool call is complete
+                    if call_id and call_id != self._current_call_id and self._current_call_id:
+                        # Emit the completed tool call
+                        if self._current_func_name and self._current_func_args.endswith("}"):
+                            fn_tool_call = base_llm.FunctionToolCall(
+                                name=self._current_func_name,
+                                arguments=self._current_func_args,
+                                call_id=self._current_call_id,
+                            )
+                            self._event_ch.send_nowait(base_llm.ChatChunk(
+                                id=chunk_data.get("id", ""),
+                                delta=base_llm.ChoiceDelta(
+                                    role="assistant",
+                                    content="",
+                                    tool_calls=[fn_tool_call],
+                                ),
+                            ))
+                        # Reset for new call
+                        self._current_func_name = ""
+                        self._current_func_args = ""
+
+                    # Accumulate name
+                    if func_name:
+                        self._current_func_name += func_name
+                    # Accumulate arguments
+                    if func_args:
+                        self._current_func_args += func_args
+                    # Track call_id
+                    if call_id:
+                        self._current_call_id = call_id
+
+                    # Check if tool call is complete (arguments end with })
+                    if self._current_func_args.endswith("}") and self._current_func_name:
+                        fn_tool_call = base_llm.FunctionToolCall(
+                            name=self._current_func_name,
+                            arguments=self._current_func_args,
+                            call_id=self._current_call_id,
+                        )
+                        self._current_func_name = ""
+                        self._current_func_args = ""
+                        self._current_call_id = ""
+                        # Emit tool call, but also return content if any
+                        return base_llm.ChatChunk(
+                            id=chunk_data.get("id", ""),
+                            delta=base_llm.ChoiceDelta(
+                                role="assistant",
+                                content=content,  # May be empty or have trailing content
+                                tool_calls=[fn_tool_call],
+                            ),
+                        )
+
+                # Tool call is still incomplete, but we may have content to emit
+                if content:
                     return base_llm.ChatChunk(
                         id=chunk_data.get("id", ""),
                         delta=base_llm.ChoiceDelta(
-                            role="assistant",
                             content=content,
-                            tool_calls=fn_tool_calls,
+                            role="assistant",
                         ),
                     )
+                return None
 
-            if not content and not tool_calls:
+            # If we have a complete tool call accumulated, emit it
+            # (This handles edge cases where the completion chunk doesn't have tool_calls delta)
+            if self._current_func_args.endswith("}") and self._current_func_name:
+                fn_tool_call = base_llm.FunctionToolCall(
+                    name=self._current_func_name,
+                    arguments=self._current_func_args,
+                    call_id=self._current_call_id,
+                )
+                self._current_func_name = ""
+                self._current_func_args = ""
+                self._current_call_id = ""
+                return base_llm.ChatChunk(
+                    id=chunk_data.get("id", ""),
+                    delta=base_llm.ChoiceDelta(
+                        role="assistant",
+                        content=content,
+                        tool_calls=[fn_tool_call],
+                    ),
+                )
+
+            if not content:
                 return None
 
             return base_llm.ChatChunk(
@@ -253,7 +339,8 @@ class VLLMChatStream(base_llm.LLMStream):
                     role="assistant",
                 ),
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"[vllm_llm] _parse_sse_chunk error: {e}")
             return None
 
 
