@@ -96,47 +96,8 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # ============ 4. TTS 代理服务 (DashScope API) ============
-  tts-service:
-    build:
-      context: ./tts_service
-      dockerfile: Dockerfile
-    environment:
-      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
-      DASHSCOPE_TTS_MODEL: ${DASHSCOPE_TTS_MODEL:-qwen3-tts-instruct-flash-realtime-2026-01-22}
-      DASHSCOPE_TTS_VOICE: ${DASHSCOPE_TTS_VOICE:-Cherry}
-      HOST: "0.0.0.0"
-      PORT: "8001"
-    networks:
-      - voice-network
-      - ai_net
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
 
-  # ============ 5. 歌声服务 (Mock 模式) ============
-  singing-service:
-    build:
-      context: ./singing_service
-      dockerfile: Dockerfile
-    environment:
-      HOST: "0.0.0.0"
-      PORT: "8002"
-    networks:
-      - voice-network
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-    restart: unless-stopped
-
-  # ============ 6. LiveKit Agent (DashScope API) ============
+  # ============ 4. LiveKit Agent (DashScope API) ============
   agent:
     build:
       context: ./agent
@@ -179,8 +140,6 @@ services:
       QWEN3_TTS_REF_AUDIO: ${QWEN3_TTS_REF_AUDIO:-/data/voice-temp/voices/voice_8fe34d12.wav}
       QWEN3_TTS_REF_TEXT: ${QWEN3_TTS_REF_TEXT:-这是一段参考音色的示例文本}
       # 微服务地址
-      TTS_SERVICE_URL: http://tts-service:8001
-      SINGING_SERVICE_URL: http://singing-service:8002
       SING_AGENT_URL: http://sing_agent:8080
       # System Prompt
       SYSTEM_PROMPT: ${SYSTEM_PROMPT:-}
@@ -204,10 +163,6 @@ services:
       CHAT_HISTORY_MAX_TURNS: ${CHAT_HISTORY_MAX_TURNS:-10}
     depends_on:
       livekit:
-        condition: service_healthy
-      tts-service:
-        condition: service_healthy
-      singing-service:
         condition: service_healthy
     volumes:
       - /data/voice-temp:/data/voice-temp:rw
