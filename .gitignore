@@ -17,14 +17,12 @@ frontend/dist/
 # Backend build
 backend/.next/
 backend/out/
+backend/next-env.d.ts
+backend/tsconfig.tsbuildinfo
 
 # Services build artifacts
 agent/dist/
 agent/build/
-tts_service/dist/
-tts_service/build/
-singing_service/dist/
-singing_service/build/
 
 # Models (large files, download separately)
 models/Qwen3-TTS/

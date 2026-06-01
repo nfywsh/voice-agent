@@ -127,11 +127,7 @@ curl -k https://localhost:40082/health
 
 acme.sh 会自动处理证书续期（通常在到期前 30 天）。
 
-续期后的 reloadcmd 配置为 `echo 'Certificate renewed'`，如需更完整的处理（如重启 nginx），可修改为：
-
-```bash
---reloadcmd "docker exec voice-agent-nginx-1 nginx -s reload"
-```
+续期脚本 `renew-ssl-cert.sh` 会在证书更新后同时重启 nginx 和 LiveKit 服务，确保两个服务使用新证书。
 
 ## 常见问题
 

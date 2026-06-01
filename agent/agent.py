@@ -1,19 +1,18 @@
 # agent/agent.py
-"""LiveKit 全双工语音 Agent 主程序 [已完成 - DashScope API 改造]
+"""LiveKit 全双工语音 Agent 主程序
 
 架构说明：
 - VoiceAssistant 继承 Agent，定义系统指令和工具函数
-- DashScopeSTT 通过 WebSocket 对接阿里云 Fun-ASR 实时语音识别
-- LLM 通过 OpenAI 兼容 API 对接 DashScope Qwen3.5-122B-W8A8
-- QwenTTSAdapter 对接 TTS 微服务（内部调用 DashScope Qwen3-TTS API），24kHz→48kHz 重采样
-- SingingHandler 对接歌声服务，流式推歌声音频到 LiveKit
+- FunASRSTT / OpenAISTT 通过 HTTP 对接本地 Fun-ASR 实时语音识别
+- LLM 通过 OpenAI 兼容 API 对接本地 VLLM (Qwen3.6-35B-A3B)
+- Qwen3TTSAdapter 对接本地 VLLM TTS (Qwen3-TTS-Base)，24kHz→48kHz 重采样
+- SingingHandler 对接 sing_agent 歌声服务，流式推歌声音频到 LiveKit
 
 API 配置（全部通过环境变量注入）：
-- DASHSCOPE_API_KEY: 阿里云 DashScope API Key（共用）
-- DASHSCOPE_BASE_URL: API 基地址（默认 https://dashscope.aliyuncs.com/compatible-mode/v1）
-- DASHSCOPE_ASR_MODEL: ASR 模型（默认 fun-asr-2025-11-07）
-- DASHSCOPE_TTS_MODEL: TTS 模型（默认 qwen3-tts-instruct-flash-realtime-2026-01-22）
-- LLM_MODEL: LLM 模型（默认 Qwen3.5-122B-W8A8）
+- OPENAI_ASR_BASE_URL: Fun-ASR HTTP 地址
+- OPENAI_LLM_BASE_URL: VLLM LLM 地址
+- QWEN3_TTS_BASE_URL: VLLM TTS 地址
+- SING_AGENT_URL: 歌声服务地址
 - LLM_CHAT_TEMPLATE_KWARGS: LLM 模板参数 JSON，默认 {"enable_thinking": false}
 - CHAT_HISTORY_MAX_TURNS: 聊天历史保留轮数，默认 10
 
@@ -43,6 +42,7 @@ import os
 from typing import AsyncIterable, Optional
 
 import aiohttp
+import numpy as np
 from dotenv import load_dotenv
 from livekit import agents, rtc
 from livekit.agents import (
@@ -176,8 +176,9 @@ _DEFAULT_SYSTEM_PROMPT = (
     "  歌词内容第一句\n"
     "  [00:00.05][verse]\n"
     "  歌词内容第二句\n"
-    "  （注：[start] 和 [intro] 标记结构，[00:xx.xx] 为时间戳，[verse] 为行标签，可选 rap/melodic/chorus 等）\n"
-    "- 工具调用返回后，给出简短的过渡语，不要重复工具返回的文本\n"
+    "  （注：[start] 和 [intro] 标记结构，[00:xx.xx] 为时间戳，[verse] 为行标签，可选 rap/melodic/chorus 等；前奏 [intro] 不超过 5 秒）\n"
+    "- 工具调用返回后，给出简短的过渡语，不要重复工具返回的文本，更不要生成歌词内容\n"
+    "- 重要：唱歌工具（sing_a_song）调用后，**禁止**再生成或朗读歌词，歌曲音频会直接播放\n"
     "## 对话风格\n"
     "- 回复简洁自然，适合语音播报\n"
     "- 避免超长回复（控制在 100 字以内），用户可以随时打断\n"
@@ -258,6 +259,11 @@ class VoiceAssistant(Agent):
         self.chat_history_manager = ChatHistoryManager(max_turns=CHAT_HISTORY_MAX_TURNS)
         self._chat_history_injected = False
         self._pending_chat_history = None
+        # 歌曲播放状态
+        self._tts_idle_event = asyncio.Event()
+        self._tts_idle_event.set()  # 初始为空闲
+        self._pending_song_path: Optional[str] = None
+        self._song_playback_task: Optional[asyncio.Task] = None
 
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
@@ -403,115 +409,74 @@ class VoiceAssistant(Agent):
         room_id = getattr(self, '_room_id', None) or "default"
         logger.info(f"[sing_a_song] title={title}, style={style}, lyrics_len={len(lyrics)}, room={room_id}")
 
+        # 返回简短回复，让 LLM 继续生成自然的后续内容（TTS 会播放）
+        # 歌曲在后台生成，完成后等 TTS 空闲再播放
+        # 重要：清除 idle 状态，确保歌曲等待本次 TTS 完成
+        self._tts_idle_event.clear()
+        asyncio.create_task(self._generate_and_play_song(title, lyrics, style, room_id))
+        return "好的，正在为你创作这首歌曲，请稍候..."
+
+    async def _generate_and_play_song(self, title: str, lyrics: str, style: str, room_id: str):
+        """后台生成歌曲，完成后等待 TTS 空闲再播放"""
+        song_path = None
         SING_AGENT_URL = os.environ.get("SING_AGENT_URL", "http://localhost:8080")
 
         try:
             async with aiohttp.ClientSession() as session:
                 if not lyrics:
-                    # 简单请求：随机歌曲 + 音色转换（快速路径）
+                    # 快速路径：随机歌曲 + 音色转换
                     async with session.get(
                         f"{SING_AGENT_URL}/sing/random-song",
                         timeout=aiohttp.ClientTimeout(total=10.0),
                     ) as resp:
                         if not resp.ok:
-                            logger.error(f"[sing_a_song] Failed to get random song: {resp.status}")
-                            return "抱歉，暂时没有可用的歌曲。"
+                            logger.error(f"[_generate_and_play_song] random-song failed: {resp.status}")
+                            return
                         data = await resp.json()
                         song_path = data.get("song_path")
-                        logger.info(f"[sing_a_song] Random song: {song_path}")
 
                     voice_path = await self._get_room_voice_path(room_id)
-
-                    if not voice_path:
-                        asyncio.create_task(self._play_song_file(song_path))
-                        return "正在播放随机歌曲"
-
-                    async with session.post(
-                        f"{SING_AGENT_URL}/sing/convert-direct",
-                        json={
-                            "song_path": song_path,
-                            "voice_path": voice_path,
-                        },
-                        timeout=aiohttp.ClientTimeout(total=60.0),
-                    ) as resp:
-                        if not resp.ok:
-                            logger.error(f"[sing_a_song] Convert failed: {resp.status}")
-                            return "音色转换失败，播放原歌曲。"
-                        result = await resp.json()
-                        result_path = result.get("result_path")
-                        logger.info(f"[sing_a_song] Converted song file: {result_path}")
-                        asyncio.create_task(self._play_song_file(result_path))
-                        return "正在用你的音色演绎歌曲"
+                    if voice_path:
+                        async with session.post(
+                            f"{SING_AGENT_URL}/sing/convert-direct",
+                            json={"song_path": song_path, "voice_path": voice_path},
+                            timeout=aiohttp.ClientTimeout(total=60.0),
+                        ) as resp:
+                            if resp.ok:
+                                result = await resp.json()
+                                song_path = result.get("result_path")
                 else:
-                    # 复杂请求：尝试 /sing/generate 创作歌曲，失败则 fallback 到简单路径
+                    # 生成路径
                     voice_path = await self._get_room_voice_path(room_id)
-
-                    payload = {
-                        "lyrics": lyrics,
-                        "style": style,
-                        "model_type": "acestep",
-                        "duration": 90,
-                    }
+                    payload = {"lyrics": lyrics, "style": style, "model_type": "acestep", "duration": 90}
                     if voice_path:
                         payload["voice_path"] = voice_path
-
-                    generate_failed = False
                     async with session.post(
                         f"{SING_AGENT_URL}/sing/generate",
                         json=payload,
                         timeout=aiohttp.ClientTimeout(total=120.0),
                     ) as resp:
-                        if not resp.ok:
-                            logger.error(f"[sing_a_song] Generate failed: {resp.status}, falling back to random-song")
-                            generate_failed = True
-                        else:
+                        if resp.ok:
                             result = await resp.json()
                             song_path = result.get("song_path") or result.get("vocal_path")
-                            logger.info(f"[sing_a_song] Generated song file: {song_path}")
-                            asyncio.create_task(self._play_song_file(song_path))
-                            return f"正在演唱《{title or '即兴歌曲'}》，风格：{style}"
 
-                    # Fallback: generate 失败时，使用随机歌曲 + 音色转换
-                    if generate_failed:
-                        logger.info(f"[sing_a_song] Falling back to random-song + convert-direct")
-                        async with session.get(
-                            f"{SING_AGENT_URL}/sing/random-song",
-                            timeout=aiohttp.ClientTimeout(total=10.0),
-                        ) as resp:
-                            if not resp.ok:
-                                logger.error(f"[sing_a_song] Fallback random-song failed: {resp.status}")
-                                return "抱歉，暂时没有可用的歌曲。"
-                            data = await resp.json()
-                            fallback_song_path = data.get("song_path")
-                            logger.info(f"[sing_a_song] Fallback random song: {fallback_song_path}")
+            if not song_path:
+                logger.error(f"[_generate_and_play_song] No song_path generated")
+                return
 
-                        if voice_path:
-                            async with session.post(
-                                f"{SING_AGENT_URL}/sing/convert-direct",
-                                json={
-                                    "song_path": fallback_song_path,
-                                    "voice_path": voice_path,
-                                },
-                                timeout=aiohttp.ClientTimeout(total=60.0),
-                            ) as resp:
-                                if not resp.ok:
-                                    logger.error(f"[sing_a_song] Fallback convert failed: {resp.status}")
-                                    asyncio.create_task(self._play_song_file(fallback_song_path))
-                                    return "音色转换失败，播放原歌曲。"
-                                result = await resp.json()
-                                result_path = result.get("result_path")
-                                logger.info(f"[sing_a_song] Fallback converted song file: {result_path}")
-                                asyncio.create_task(self._play_song_file(result_path))
-                                return f"正在用你的音色演绎《{title or '即兴歌曲'}》"
-                        else:
-                            asyncio.create_task(self._play_song_file(fallback_song_path))
-                            return "正在播放随机歌曲"
+            logger.info(f"[_generate_and_play_song] Song generated: {song_path}, waiting for TTS idle")
+
+            # 等待 TTS 播放完成（此时 LLM 的后续内容正在 TTS 播放）
+            await self._tts_idle_event.wait()
+
+            # TTS 播完了，开始播放歌曲
+            logger.info(f"[_generate_and_play_song] TTS idle, playing song now")
+            self._song_playback_task = asyncio.create_task(self._play_song_file(song_path))
 
         except asyncio.CancelledError:
-            return "已取消唱歌"
+            pass
         except Exception as e:
-            logger.error(f"[sing_a_song] Error: {e}")
-            return f"唱歌功能出现异常: {str(e)}"
+            logger.error(f"[_generate_and_play_song] Error: {e}")
 
     async def _get_room_voice_path(self, room_id: str) -> Optional[str]:
         """获取room对应的音色文件路径，优先用 agent 入房时缓存的，无则查 backend"""
@@ -1089,6 +1054,17 @@ async def entrypoint(ctx: JobContext):
 
     ctx.room.on("data_received", handle_data_packet)
 
+    # 注册 Agent 状态变化事件（用于歌曲排队播放）
+    # agent_state_changed: "initializing" | "idle" | "listening" | "thinking" | "speaking"
+    @session.on("agent_state_changed")
+    def on_agent_state_changed(ev):
+        """Agent 状态变为 speaking 时标记 TTS 忙碌，变为 idle/listening 时标记空闲"""
+        logger.info(f"[tts_state] agent_state_changed: {ev.old_state} -> {ev.new_state}")
+        if ev.new_state == "speaking":
+            agent._tts_idle_event.clear()
+        elif ev.new_state in ("idle", "listening"):
+            agent._tts_idle_event.set()
+
     # 注册 session 关闭回调
     @session.on("close")
     def on_session_close():
@@ -1139,6 +1115,7 @@ if __name__ == "__main__":
     cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
+            agent_name="voice-agent",
             num_idle_processes=int(os.environ.get("LIVEKIT_NUM_IDLE_PROCESSES", "1")),
             job_executor_type=agents.JobExecutorType.THREAD,
         )

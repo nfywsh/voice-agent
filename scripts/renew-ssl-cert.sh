@@ -112,6 +112,10 @@ docker compose rm -f nginx 2>/dev/null || true
 log_info "重启 nginx 服务..."
 docker compose up -d nginx
 
+# 重启 LiveKit 服务
+log_info "重启 LiveKit 服务..."
+docker compose up -d livekit
+
 # 等待 nginx 启动
 sleep 3
 
@@ -125,6 +129,16 @@ else
     log_warn "HTTPS 服务可能异常 (HTTP $HTTP_CODE), 请手动检查"
 fi
 
+# 验证 LiveKit WSS (通过 nginx 代理)
+log_info "验证 LiveKit WSS 连接 (通过 nginx)..."
+WSS_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:40082/health 2>/dev/null || echo "000")
+
+if [ "$WSS_CODE" = "200" ]; then
+    log_info "LiveKit WSS 代理正常! (HTTP $WSS_CODE)"
+else
+    log_warn "LiveKit WSS 代理可能异常 (HTTP $WSS_CODE), 请手动检查"
+fi
+
 echo ""
 log_info "=================================="
 log_info "SSL 证书更新完成!"
@@ -132,4 +146,5 @@ log_info "域名: $DOMAIN"
 log_info "证书: $SSL_DIR/${DOMAIN}.pem"
 log_info "密钥: $SSL_DIR/${DOMAIN}.key"
 log_info "HTTPS 端口: 40082"
+log_info "LiveKit WSS 端口: 7443"
 log_info "=================================="
