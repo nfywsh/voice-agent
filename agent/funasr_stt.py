@@ -109,7 +109,7 @@ class FunASRSTT(stt.STT):
         pcm_16k = _resample_to_16k(audio_np.tobytes(), sample_rate)
         logger.info(f"[FunASRSTT] Resampled to 16kHz: {len(pcm_16k)} bytes, {len(pcm_16k)//2//16000:.2f}s")
 
-        asr_temp_dir = "/data/asr-temp"
+        asr_temp_dir = "/data/voice-temp/asr"
         os.makedirs(asr_temp_dir, exist_ok=True)
         tmp_path = os.path.join(asr_temp_dir, f"asr_{uuid.uuid4().hex}.wav")
         with wave.open(tmp_path, 'wb') as wf:
@@ -236,7 +236,7 @@ class FunASRSTTStream(stt.RecognizeStream):
             # RecognizeStream may already resample to _ASR_SAMPLE_RATE, but we defensively check
             pcm_16k = _resample_to_16k(bytes(audio_buffer), actual_sample_rate)
 
-            asr_temp_dir = "/data/asr-temp"
+            asr_temp_dir = "/data/voice-temp/asr"
             os.makedirs(asr_temp_dir, exist_ok=True)
             tmp_path = os.path.join(asr_temp_dir, f"asr_{uuid.uuid4().hex}.wav")
             with wave.open(tmp_path, 'wb') as wf:

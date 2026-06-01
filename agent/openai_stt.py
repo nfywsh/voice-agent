@@ -100,8 +100,8 @@ class OpenAISTT(stt.STT):
 
         pcm_16k = _resample_to_16k(audio_np.tobytes(), sample_rate)
 
-        # 保存到 /data/asr-temp 目录（容器内挂载路径，对应 ASR 服务的要求）
-        asr_temp_dir = "/data/asr-temp"
+        # 保存到 /data/voice-temp/asr 目录（容器内挂载路径，对应 ASR 服务的要求）
+        asr_temp_dir = "/data/voice-temp/asr"
         os.makedirs(asr_temp_dir, exist_ok=True)
         import wave
         tmp_path = os.path.join(asr_temp_dir, f"asr_{uuid.uuid4().hex}.wav")

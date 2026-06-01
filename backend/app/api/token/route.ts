@@ -103,15 +103,19 @@ export async function GET(request: NextRequest) {
             }
           }
           if (!lockAcquired) {
-            console.warn(`[Token API] Timeout waiting for lock, proceeding anyway`);
+            console.warn(`[Token API] Timeout waiting for lock, will still try to clean up known dispatch`);
           }
         } else {
           throw mkdirErr;
         }
       }
 
+      // 即使无法获取锁（超时），也必须尝试清理已知 dispatch，避免残留
+      // 只有在成功获取锁时才创建新 dispatch
       if (!lockAcquired) {
-        // 无法获取锁，直接返回 token（让请求继续，dispatch 创建可能失败但不影响用户体验）
+        // 无法获取锁，只做清理，不创建新 dispatch
+        await cleanupKnownDispatch(dispatchClient, sanitizedRoom);
+        // 返回 token，让前端重试（下次可能获取到锁）
         return NextResponse.json(
           { token: jwt, room: sanitizedRoom, identity: sanitizedUser },
           { headers: { 'Cache-Control': 'no-store' } }
@@ -139,7 +143,7 @@ export async function GET(request: NextRequest) {
           await cleanupKnownDispatch(dispatchClient, sanitizedRoom);
         }
 
-        const newDispatch = await dispatchClient.createDispatch(sanitizedRoom, '');
+        const newDispatch = await dispatchClient.createDispatch(sanitizedRoom, 'voice-agent');
         console.log(`[Token API] Agent dispatch created: id=${newDispatch.id} for room: ${sanitizedRoom}`);
 
         // 保存 dispatch ID 到本地缓存，供下次进入房间时清理

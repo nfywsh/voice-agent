@@ -210,7 +210,6 @@ services:
       singing-service:
         condition: service_healthy
     volumes:
-      - /data/asr-temp:/data/asr-temp:rw
       - /data/voice-temp:/data/voice-temp:rw
     networks:
       - voice-network
