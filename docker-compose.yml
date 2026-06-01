@@ -1,9 +1,11 @@
 # docker-compose.yml
-# 全双工语音聊天机器人 - 完整服务编排 (DashScope API 版本)
+# 全双工语音聊天机器人 - 完整服务编排
 #
 # 架构说明：
-#   所有 AI 能力（LLM/ASR/TTS）通过阿里云 DashScope API 调用，
-#   不再需要本地 GPU 和模型文件。
+#   - LLM: 本地 VLLM (Qwen3.6-35B-A3B)
+#   - ASR: 本地 FunASR 实时语音识别
+#   - TTS: 本地 VLLM TTS (Qwen3-TTS-Base)
+#   - 唱歌: Sing Agent (:8080)
 #
 # 使用方式:
 #   1. cp .env.example .env  # 配置环境变量
@@ -13,9 +15,7 @@
 #   - nginx: 反向代理 + 静态文件
 #   - backend: Next.js Token 生成服务
 #   - livekit: WebRTC SFU 服务器
-#   - agent: LiveKit Agent (通过 DashScope API 调用 LLM/ASR)
-#   - tts-service: TTS 代理层 (通过 DashScope API 调用 Qwen3-TTS)
-#   - singing-service: 歌声服务 (Mock 模式)
+#   - agent: LiveKit Agent
 
 version: "3.8"
 

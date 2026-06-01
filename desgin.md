@@ -4,7 +4,7 @@
 
 ### 1.1 项目背景
 
-本项目旨在构建一个具备**全双工实时对话**、**自然打断**、**工具调用**及**唱歌能力**的语音聊天机器人。系统采用模块化级联架构，整合业界领先的开源模型（Qwen3.5-35B-A3B、Qwen3-TTS、VibeVoice-1.5B），并基于 LiveKit 实时通信框架实现低延迟的语音交互体验。
+本项目旨在构建一个具备**全双工实时对话**、**自然打断**、**工具调用**及**唱歌能力**的语音聊天机器人。系统采用模块化级联架构，整合业界领先的开源模型（Qwen3.6-35B-A3B、Qwen3-TTS、VibeVoice-1.5B），并基于 LiveKit 实时通信框架实现低延迟的语音交互体验。
 
 ### 1.2 核心特性
 
@@ -23,8 +23,8 @@
 | ---------- | --------------------------------------------------------------- |
 | **前端**   | React + Vite + LiveKit Client SDK + WebRTC                       |
 | **后端**   | Python (FastAPI) + LiveKit Agents SDK + Next.js (Token Service) |
-| **AI 模型** | Qwen3.5-35B-A3B (LLM)、Qwen3-TTS (流式 TTS)、VibeVoice-1.5B (歌声) |
-| **ASR**    | Deepgram (云端) / Whisper (本地备选)                              |
+| **AI 模型** | Qwen3.6-35B-A3B (LLM)、Qwen3-TTS (流式 TTS)、VibeVoice-1.5B (歌声) |
+| **ASR**    | FunASR (本地实时识别)                                             |
 | **实时通信** | LiveKit Server (开源 RTC 引擎)                                   |
 | **部署**   | Docker Compose + Nginx + NVIDIA Docker Toolkit (GPU 支持)        |
 
@@ -54,18 +54,18 @@
 └─────────────────┘      └─────────┬─────────┘      └───────┬───────┘
                                    │                         │
                                    │               ┌─────────▼─────────┐
-                                   │               │  LLM (Qwen3.5)   │
+                                   │               │  LLM (Qwen3.6)    │
                                    │               └─────────┬─────────┘
                                    │                         │
                           ┌────────┴────────┐        ┌───────┴───────┐
                           │                 │        │               │
                    ┌──────▼──────┐   ┌──────▼──────┐ │  ┌────────────▼────────┐
-                   │  TTS Service │   │  Singing    │ │  │  Tool Execution      │
-                   │ (Qwen3-TTS)  │   │  Service    │ │  │ (Weather, Search等)  │
-                   └──────────────┘   └─────────────┘ │  └─────────────────────┘
+                   │  VLLM TTS   │   │  Sing Agent │ │  │  Tool Execution      │
+                   │ (Qwen3-TTS) │   │  (8080)     │ │  │ (Weather, Search等)  │
+                   └─────────────┘   └─────────────┘ │  └─────────────────────┘
                                                        │
                                           ┌────────────▼────────────┐
-                                          │   Deepgram ASR (Cloud)   │
+                                          │   FunASR ASR (Local)     │
                                           └──────────────────────────┘
 ```
 
@@ -79,17 +79,17 @@
 | **LiveKit Server** | WebRTC 信令服务，房间管理，音视频流转发                                 | 7880/7881 端口   |
 | **Agent**          | 对话逻辑编排，调用 ASR/LLM/TTS，管理打断与工具调用                      | LiveKit Worker   |
 | **LLM**            | 大语言模型推理，生成对话文本，支持 Function Calling                      | vLLM 兼容 API    |
-| **TTS Service**    | 文本转语音，流式生成对话音频                                            | `/tts/stream`    |
-| **Singing Service**| 歌词到歌声合成，流式返回歌声音频                                        | `/sing`          |
-| **ASR**            | 实时语音识别，将用户语音转为文本                                        | Deepgram API     |
+| **VLLM TTS**       | 文本转语音，流式生成对话音频，通过 qwen3_tts_adapter 直连 VLLM TTS      | VLLM TTS :8021   |
+| **Sing Agent**     | 歌词到歌声合成，流式返回歌声音频                                        | Sing Agent :8080 |
+| **ASR**            | 实时语音识别，将用户语音转为文本                                        | FunASR HTTP API  |
 
 ### 2.3 数据流（一次典型对话）
 
 1.  用户通过浏览器加入 LiveKit 房间。
 2.  用户说话，音频通过 WebRTC 发送到 LiveKit Server。
-3.  Agent 从 LiveKit 获取音频流，通过 Deepgram ASR 转为文本。
-4.  Agent 将文本发送给 LLM（Qwen3.5），LLM 可能返回普通文本或工具调用。
-5.  若为工具调用（如唱歌），Agent 调用对应服务（Singing Service）获取音频，直接推流；若为普通文本，则调用 TTS Service 流式合成语音。
+3.  Agent 从 LiveKit 获取音频流，通过 FunASR ASR 转为文本。
+4.  Agent 将文本发送给 LLM（Qwen3.6），LLM 可能返回普通文本或工具调用。
+5.  若为工具调用（如唱歌），Agent 调用 Sing Agent（:8080）获取音频，直接推流；若为普通文本，则调用 VLLM TTS 流式合成语音。
 6.  Agent 将合成的音频流通过 LiveKit 推送给用户。
 7.  对话过程中，VAD 持续检测用户是否打断，若检测到新语音则中止当前 TTS 播放，切换至聆听状态。
 
@@ -140,9 +140,9 @@ Agent 是整个系统的核心协调者，基于 `livekit-agents` SDK 构建。
 | 类/组件            | 职责                                                                 |
 | ------------------ | -------------------------------------------------------------------- |
 | `VoiceAssistant`   | 继承 `Agent`，定义系统指令和工具函数 (`@function_tool` 装饰器)       |
-| `QwenLLMAdapter`   | 实现 `LLM` 抽象类，对接本地 Qwen3.5 推理服务（OpenAI 兼容 API）      |
-| `QwenTTSAdapter`   | 实现 `TTS` 抽象类，对接本地 TTS 服务，支持流式合成                    |
-| `SingingHandler`   | 独立处理唱歌请求，调用 Singing Service 并返回音频流                  |
+| `VLLM LLM Adapter` | 实现 `LLM` 抽象类，对接本地 Qwen3.6-35B-A3B 推理服务（OpenAI 兼容 API）|
+| `Qwen3TTSAdapter`  | 实现 `TTS` 抽象类，对接本地 VLLM TTS 服务，支持流式合成                    |
+| `SingingHandler`   | 独立处理唱歌请求，调用 Sing Agent 并返回音频流                  |
 
 #### 3.3.2 System Prompt 注入设计
 
@@ -471,10 +471,10 @@ async def sing(request: SingRequest):
         │   Speaker 1: 梦在心间静静流淌"
         │
         ▼
-    Agent 调用 Singing Service POST /sing
+    Agent 调用 Sing Agent（端口 8080）
         │
         ▼
-    Singing Service 流式返回歌声音频
+    Sing Agent 流式返回歌声音频
         │
         ▼
     Agent 将音频流重采样至 48kHz → 推送到 LiveKit
@@ -489,18 +489,18 @@ async def sing(request: SingRequest):
 | -------------------- | -------------------------------------------------------------- |
 | 模型预加载           | 服务启动时即加载模型到 GPU，避免首次请求 10s+ 冷启动           |
 | 流式输出             | 模型边生成边推送，用户在 1-2s 内开始听到歌声                    |
-| 等待提示             | Agent 在调用 Singing Service 前先通过 TTS 说"好的，我来唱一首…"，填充等待时间 |
+| 等待提示             | Agent 在调用 Sing Agent 前先通过 TTS 说"好的，我来唱一首…"，填充等待时间 |
 | 歌曲缓存             | 对相同歌词请求做结果缓存（LRU, max=50），避免重复推理           |
 | 超时兜底             | 设置 30s 推理超时，超时后返回预设提示音并告知用户"歌声生成超时"  |
 
-### 3.6 LLM 推理服务（Qwen3.5-35B-A3B）
+### 3.6 LLM 推理服务（Qwen3.6-35B-A3B）
 
 #### 3.6.1 部署方案
 
-由于 Qwen3.5-35B-A3B 是 MoE 架构，vLLM 官方支持有限，推荐使用 **SGLang** 或 **llama.cpp** 部署。暴露与 OpenAI 兼容的 `/v1/chat/completions` 端点。
+Qwen3.6-35B-A3B 是 MoE 架构，使用 **VLLM** 部署。暴露与 OpenAI 兼容的 `/v1/chat/completions` 端点。
 
 **高并发方案**（详见第 7 节）：
-- SGLang 支持 RadixAttention 前缀缓存，对多用户共享 system prompt 的场景有显著优化。
+- VLLM 支持 prefix caching，对多用户共享 system prompt 的场景有显著优化。
 - 启用 `--enable-prefix-caching` 参数，使相同 system prompt 前缀的请求共享 KV Cache。
 
 #### 3.6.2 Function Calling 定义
@@ -543,39 +543,35 @@ async def sing(request: SingRequest):
 | LLM 服务不可用 (>10s)  | Agent 播放预设错误提示音，并记录错误日志                       |
 | 响应过长 (>500 tokens)  | 在 system prompt 中约束 LLM 控制回复长度；超长时截断并合成已输出部分 |
 
-### 3.7 ASR 服务（Deepgram）
+### 3.7 ASR 服务（FunASR）
 
 #### 3.7.1 选型与集成
 
-- Deepgram 提供低延迟的实时流式语音识别，支持中文。
-- 在 Agent 中通过 `deepgram.STT` 插件直接集成，无需额外封装。
+- FunASR 提供低延迟的实时流式语音识别，支持中文。
+- 在 Agent 中通过 `FunASRSTT` 或 `OpenAISTT` 插件直接集成，通过 HTTP API 调用本地 FunASR 服务。
 
-**备选方案**：可替换为本地 Whisper 模型以降低网络依赖，但需额外处理流式输入。Whisper 适合离线/私有化部署场景，延迟通常高于 Deepgram 100-200ms。
+**备选方案**：可替换为 OpenAI Whisper API 以降低本地部署依赖，但需额外处理流式输入。
 
 #### 3.7.2 音频格式参数
 
 | 参数              | 值              | 说明                                         |
 | ----------------- | --------------- | -------------------------------------------- |
-| 采样率 (input)    | 16000 Hz        | Deepgram 推荐的语音识别采样率                |
+| 采样率 (input)    | 16000 Hz        | FunASR 推荐的语音识别采样率                  |
 | 编码格式          | linear16 (PCM)  | LiveKit 从 WebRTC Opus 解码后输出 PCM        |
 | 语言              | zh              | 中文语音识别，可设置 `auto` 开启自动语言检测 |
-| 标点              | 开启            | Deepgram 开启智能标点，提升转写可读性        |
+| 标点              | 开启            | FunASR 开启智能标点，提升转写可读性          |
 
-#### 3.7.3 备选 ASR 方案：本地 Whisper
+#### 3.7.3 备选 ASR 方案：OpenAI Whisper API
 
-如果需要纯离线部署（不依赖 Deepgram 云端），可使用本地 Whisper 模型：
+如果需要纯离线部署（不依赖云端），可使用 OpenAI Whisper API：
 
 ```python
-# 备选 ASR 配置（本地 Whisper）
-from livekit.plugins import whisper
+# 备选 ASR 配置（OpenAI Whisper）
+from agent.openai_stt import create_stt
 
-stt = whisper.STT(
-    model="large-v3",         # 中文效果最好的模型
-    language="zh",
-    sample_rate=16000,
-)
+stt = create_stt()  # 通过 OPENAI_ASR_* 环境变量配置
 # 注意：Whisper 本身不支持真正的流式输入，需配合 VAD 做段切分后批量识别
-# 延迟比 Deepgram 高约 200-500ms，适合对延迟不敏感的场景
+# 延迟比 FunASR 高约 200-500ms，适合对延迟不敏感的场景
 ```
 
 ### 3.8 音频管线参数汇总
@@ -590,7 +586,7 @@ Agent 接收 (48kHz, PCM, mono)
     │
     ├─► VAD 检测 (重采样到 16kHz, PCM) ──► Silero VAD
     │
-    ├─► ASR 识别 (重采样到 16kHz, PCM) ──► Deepgram
+    ├─► ASR 识别 (重采样到 16kHz, PCM) ──► FunASR
     │
     ▼  TTS/Singing 输出
 TTS 生成 (24kHz, PCM, mono)
@@ -606,7 +602,7 @@ Agent 输出 (48kHz, PCM, mono)
 | ---------------- | ---------- | ------------- | ----- | ----------------------------------- |
 | WebRTC 传输      | 48kHz      | Opus          | mono  | WebRTC/Opus 标准格式               |
 | VAD 输入         | 16kHz      | PCM (S16LE)   | mono  | Silero VAD 训练采样率              |
-| ASR 输入         | 16kHz      | PCM (S16LE)   | mono  | Deepgram 推荐输入格式              |
+| ASR 输入         | 16kHz      | PCM (S16LE)   | mono  | FunASR 推荐输入格式                |
 | TTS 输出         | 24kHz      | PCM (S16LE)   | mono  | Qwen3-TTS 默认输出格式             |
 | Singing 输出     | 24kHz      | PCM (S16LE)   | mono  | VibeVoice 默认输出格式             |
 | Agent → LiveKit  | 48kHz      | PCM (S16LE)   | mono  | 推流前需从 24kHz 重采样到 48kHz    |
@@ -639,7 +635,7 @@ Silero VAD 的关键参数需根据实际场景调优：
 ```bash
 # 1. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 LiveKit 密钥、Deepgram Key 等
+# 编辑 .env，填入 LiveKit 密钥、FunASR 服务地址等
 
 # 2. 生成 SSL 证书（测试用）
 mkdir -p nginx/ssl
@@ -693,20 +689,19 @@ docker-compose up -d --build
 │         ┌───────────┼───────────┐                │
 │         │           │           │                │
 │  ┌──────▼───┐ ┌─────▼────┐ ┌───▼──────────┐    │
-│  │LLM       │ │TTS       │ │Singing       │    │
-│  │(SGLang)  │ │Service   │ │Service       │    │
+│  │LLM       │ │VLLM TTS  │ │Sing Agent    │    │
+│  │(VLLM)    │ │(8021)    │ │(8080)        │    │
 │  │(1 GPU)   │ │(1 GPU)   │ │(1 GPU)       │    │
 │  └──────────┘ └──────────┘ └──────────────┘    │
 │                                                  │
 │  GPU 分配: GPU0 -> LLM, GPU1 -> TTS + Singing   │
-│  (TTS 和 Singing 共享 GPU1，串行推理)            │
 └─────────────────────────────────────────────────┘
 ```
 
 **关键配置**：
 - Agent 启动 1 个 Worker 进程，单进程处理所有房间。
 - TTS 和 Singing 共享同一 GPU（通过 `CUDA_VISIBLE_DEVICES=1` 控制），可以交替使用但不会同时推理，显存峰值约 7GB。
-- LLM 独占 GPU0，SGLang 启用 prefix caching 优化 system prompt 共享。
+- LLM 独占 GPU0，VLLM 启用 prefix caching 优化 system prompt 共享。
 - Nginx 在同一台机器上做反向代理。
 
 **启动命令**：
@@ -744,8 +739,8 @@ docker-compose --profile demo up -d
               ┌───────────────┼───────────────┐
               │               │               │
      ┌────────▼──────┐ ┌─────▼──────┐ ┌──────▼───────┐
-     │ LLM Cluster   │ │ TTS Pool   │ │ Singing Pool │
-     │ (SGLang x2,   │ │ (2 实例,   │ │ (2 实例,    │
+     │ LLM Cluster   │ │ VLLM TTS   │ │ Sing Agent   │
+     │ (VLLM x2,     │ │ (2 实例,   │ │ (2 实例,    │
      │  prefix cache) │ │  负载均衡) │ │  队列调度)   │
      └───────────────┘ └────────────┘ └──────────────┘
 ```
@@ -754,9 +749,9 @@ docker-compose --profile demo up -d
 
 1. **Agent Worker 池**：每个 Worker 处理一个房间的对话逻辑。使用 LiveKit 的 `WorkerType.ROOM` 模式，当一个房间被创建时自动派发空闲 Worker。Worker 数量可水平扩展。
 
-2. **LLM 集群**：部署 2+ 个 SGLang 实例，通过 Nginx upstream 做负载均衡。所有实例共享相同 system prompt 前缀，SGLang 的 RadixAttention 前缀缓存可使重复前缀的请求复用 KV Cache，显著降低首包延迟和显存占用。
+2. **LLM 集群**：部署 2+ 个 VLLM 实例，通过 Nginx upstream 做负载均衡。所有实例共享相同 system prompt 前缀，VLLM 的 prefix caching 可使重复前缀的请求复用 KV Cache，显著降低首包延迟和显存占用。
 
-3. **TTS / Singing 服务池**：各部署 2 个实例，通过 FastAPI 内置的请求队列 + 外部负载均衡实现并发。Singing 服务因其推理耗时较长（3-5s/首歌），建议增加请求队列深度和超时控制。
+3. **TTS / Sing Agent 服务池**：各部署 2 个实例，通过请求队列实现并发。Sing Agent 因其推理耗时较长（3-5s/首歌），建议增加请求队列深度和超时控制。
 
 4. **Prompt 动态拉取**（见 3.3.2 节方式 B）：生产环境需要按租户/房间维度下发不同 system prompt，需部署 Prompt 管理 API 服务。
 
@@ -770,8 +765,8 @@ docker-compose --profile demo up -d
 # 启动 3 个 Agent Worker
 docker-compose up -d --scale agent=3
 
-# 启动 2 个 TTS 实例
-docker-compose up -d --scale tts-service=2
+# 启动多个 LLM 实例（VLLM 支持多实例负载均衡）
+docker-compose up -d --scale llm=2
 ```
 
 ### 5.3 并发能力估算
@@ -782,7 +777,7 @@ docker-compose up -d --scale tts-service=2
 | 中等配置       | 4            | 2        | 2        | 2            | 5-10         |
 | 高并发生产     | 10+          | 4+       | 4+       | 4+ (队列)    | 20-50+       |
 
-> **瓶颈分析**：LLM 推理通常是最先触达的瓶颈。SGLang 的 continuous batching 和 prefix caching 可显著提升吞吐。当 LLM 延迟上升时，优先扩展 LLM 实例数量。
+> **瓶颈分析**：LLM 推理通常是最先触达的瓶颈。VLLM 的 continuous batching 和 prefix caching 可显著提升吞吐。当 LLM 延迟上升时，优先扩展 LLM 实例数量。
 
 ---
 
@@ -795,13 +790,13 @@ docker-compose up -d --scale tts-service=2
               │         │         │
               ▼         ▼         ▼
           降级:切换   降级:重试  降级:提示音
-          本地Whisper  或播提示  或文本展示
+          OpenAI ASR  或播提示  或文本展示
 ```
 
 | 阶段           | 错误场景                       | 处理策略                                                           | 用户感知                                   |
 | -------------- | ------------------------------ | ------------------------------------------------------------------ | ------------------------------------------ |
-| **ASR**        | Deepgram API 超时 (>5s)        | 自动切换到本地 Whisper 模型（需预加载），降级提示延迟增加 200ms    | 几乎无感知，识别略有延迟                   |
-| **ASR**        | Deepgram API 不可用            | 切换到 Whisper，记录告警日志                                       | 延迟增加，但功能正常                       |
+| **ASR**        | FunASR 服务超时 (>5s)          | 自动切换到 OpenAI ASR（需配置），降级提示延迟增加 200ms            | 几乎无感知，识别略有延迟                   |
+| **ASR**        | FunASR 服务不可用             | 切换到 OpenAI ASR，记录告警日志                                     | 延迟增加，但功能正常                       |
 | **ASR**        | 两个 ASR 都不可用              | Agent 播放语音提示"抱歉，语音识别暂时不可用"                        | 功能不可用                                 |
 | **LLM**        | 首包超时 (>5s)                 | Agent 播放"让我想想…"提示音                                        | 用户感知到等待，但有反馈                   |
 | **LLM**        | 推理完全超时 (>15s)            | Agent 播放"抱歉，我一时没有想好"                                   | 用户感知到失败                             |
@@ -810,7 +805,7 @@ docker-compose up -d --scale tts-service=2
 | **TTS**        | 服务返回 503 (OOM)             | 重试一次，若仍失败则播放预设提示音                                  | 可能听到"嘟"声而非完整语音                |
 | **TTS**        | 请求超时 (>10s)                | 超时后播放预设提示音，将 LLM 回复文本推送到前端展示                 | 语音不可用，但可看文字                     |
 | **TTS**        | 文本过长 (>500字)              | 截断并合成前 500 字，前端展示完整文本                               | 语音不完整，但可看文字                     |
-| **Singing**    | 服务返回 503                   | Agent 回退到 TTS"念歌词"模式（用普通 TTS 朗读歌词）                 | 无歌声但有语音                             |
+| **Singing**    | Sing Agent 返回 503            | Agent 回退到 TTS"念歌词"模式（用普通 TTS 朗读歌词）                 | 无歌声但有语音                             |
 | **Singing**    | 推理超时 (>30s)                | Agent 播放"歌声生成超时，请稍后再试"                                | 明确的超时反馈                             |
 | **Singing**    | 排队等待过长 (>60s)            | 返回 429 Too Many Requests，Agent 告知用户"当前唱歌请求较多"        | 明确的繁忙反馈                             |
 | **LiveKit**    | WebRTC 连接断开                | 前端自动重连 (LiveKit SDK 内置)，Agent 保留房间状态 30s            | 短暂中断后恢复                             |
@@ -833,18 +828,7 @@ room.on('data-received', (payload) => {
 
 ### 6.3 健康检查
 
-所有微服务提供 `/health` 端点，Docker Compose 配置健康检查：
-
-```yaml
-# docker-compose.yml 片段
-tts-service:
-  healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-    interval: 30s
-    timeout: 5s
-    retries: 3
-    start_period: 60s  # 模型加载需要时间
-```
+所有微服务提供 `/health` 端点，Docker Compose 配置健康检查。Agent 服务通过 LiveKit 自带的健康检查机制确保可用性。
 
 ---
 
@@ -873,13 +857,14 @@ tts-service:
 | `LIVEKIT_API_SECRET`    | LiveKit API Secret                 | `secret`                       | 是   |
 | `LIVEKIT_URL`           | LiveKit Server 地址（内部）        | `ws://livekit:7880`            | 是   |
 | `LLM_BASE_URL`          | LLM 服务地址（OpenAI 兼容）        | `http://llm-server:8000/v1`    | 是   |
-| `LLM_MODEL`             | 模型名称                           | `Qwen3.5-35B-A3B`              | 是   |
-| `DEEPGRAM_API_KEY`      | Deepgram API Key                   | `xxxxx`                        | 是   |
-| `TTS_SERVICE_URL`       | TTS 服务内部地址                   | `http://tts-service:8001`      | 是   |
-| `SINGING_SERVICE_URL`   | 歌声服务内部地址                   | `http://singing-service:8002`  | 是   |
+| `LLM_MODEL`             | 模型名称                           | `Qwen3.6-35B-A3B`              | 是   |
+| `OPENAI_ASR_BASE_URL`   | FunASR 服务地址                   | `http://funasr:8000/v1`        | 是   |
+| `OPENAI_ASR_API_KEY`    | FunASR API Key                     | `placeholder`                  | 是   |
+| `OPENAI_ASR_MODEL`      | FunASR 模型名称                    | `fun-asr-2512`                 | 是   |
+| `QWEN3_TTS_BASE_URL`    | VLLM TTS 服务地址                  | `http://host.docker.internal:8021` | 是   |
+| `SING_AGENT_URL`        | Sing Agent 服务地址                | `http://sing_agent:8080`       | 是   |
 | `SYSTEM_PROMPT`         | 系统提示词（简单 demo 方式）       | `你是一个友好的语音助手…`      | 否   |
 | `PROMPT_SERVICE_URL`    | Prompt 动态拉取地址（生产方式）    | `http://prompt-service:8010`   | 否   |
-| `WHISPER_MODEL`         | 备选 ASR 模型名称                  | `large-v3`                     | 否   |
 | `LLM_TIMEOUT`           | LLM 首包超时阈值（秒）             | `5`                            | 否   |
 | `TTS_TIMEOUT`           | TTS 请求超时阈值（秒）             | `10`                           | 否   |
 | `SINGING_TIMEOUT`       | 歌声推理超时阈值（秒）             | `30`                           | 否   |
@@ -938,6 +923,6 @@ server {
 
 ---
 
-*文档版本：v2.0*
-*最后更新：2026-04-30*
-*变更记录：补充 System Prompt 注入设计、打断机制详细流程、音频管线参数、VAD 配置、并发架构、错误处理与降级策略、Singing Service 重新设计*
+*文档版本：v3.0*
+*最后更新：2026-06-01*
+*变更记录：更新 LLM 为 Qwen3.6-35B-A3B，ASR 替换为 FunASR，TTS/Singing Service 替换为 VLLM TTS 和 Sing Agent，删除 Deepgram/Whisper/SGLang 引用*
