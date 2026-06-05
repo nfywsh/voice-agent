@@ -58,80 +58,19 @@ from livekit.agents import (
 )
 from livekit.plugins import silero
 
-from dashscope_stt import DashScopeSTT
 from singing_handler import SingingHandler, _resample_24k_to_48k
-from tts_adapter import QwenTTSAdapter
 from monitoring.metrics import MetricsCollector
+from chat_history import ChatHistoryManager
+from thinking import get_thinking_mode, set_thinking_mode, clear_thinking_mode
+from config import (
+    CHAT_HISTORY_MAX_TURNS,
+    VAD_THRESHOLD,
+    VAD_MIN_SPEECH,
+    VAD_MIN_SILENCE,
+)
 from livekit.plugins import openai as lk_openai
 
 load_dotenv()
-
-# ============================================================
-# 配置项
-# ============================================================
-
-# LLM 模板参数（思考模式等），默认关闭思考
-LLM_CHAT_TEMPLATE_KWARGS = json.loads(
-    os.environ.get("LLM_CHAT_TEMPLATE_KWARGS", '{"enable_thinking": false}')
-)
-
-# 聊天历史保留轮数
-CHAT_HISTORY_MAX_TURNS = int(os.environ.get("CHAT_HISTORY_MAX_TURNS", "10"))
-
-
-# ============================================================
-# 思考模式存储（内存）
-# ============================================================
-# key 格式: "{room_id}:{user_id}"
-# 仅在 session 生命周期内有效，session 结束后自动清除
-_thinking_mode_store: dict[str, bool] = {}
-
-
-def get_thinking_mode(room_id: str, user_id: str) -> bool:
-    """获取当前 session 的思考模式状态"""
-    return _thinking_mode_store.get(f"{room_id}:{user_id}", False)
-
-
-def set_thinking_mode(room_id: str, user_id: str, enabled: bool) -> None:
-    """设置当前 session 的思考模式状态"""
-    _thinking_mode_store[f"{room_id}:{user_id}"] = enabled
-    logger.info(f"[thinking_mode] room={room_id}, user={user_id}, enabled={enabled}")
-
-
-def clear_thinking_mode(room_id: str, user_id: str) -> None:
-    """清除思考模式状态（session 结束时调用）"""
-    key = f"{room_id}:{user_id}"
-    if key in _thinking_mode_store:
-        del _thinking_mode_store[key]
-
-
-# ============================================================
-# 聊天历史管理器
-# ============================================================
-
-
-class ChatHistoryManager:
-    """聊天历史管理器，提供外部注入和截断能力"""
-
-    def __init__(self, max_turns: int = 10):
-        self.max_turns = max_turns
-
-    def inject_messages(self, chat_ctx: ChatContext, messages: list[dict]) -> None:
-        """注入外部消息到聊天历史
-
-        Args:
-            chat_ctx: Agent 的 ChatContext 实例
-            messages: 消息列表，格式为 [{"role": "user"|"assistant", "content": "..."}]
-        """
-        for msg in messages:
-            chat_ctx.add_message(role=msg["role"], content=msg["content"])
-        logger.info(f"[chat_history] Injected {len(messages)} messages, truncating to {self.max_turns} turns")
-        self.truncate(chat_ctx)
-
-    def truncate(self, chat_ctx: ChatContext) -> None:
-        """截断聊天历史到指定轮数"""
-        chat_ctx.truncate(max_items=self.max_turns)
-
 
 # ============================================================
 # 日志配置
@@ -142,7 +81,6 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("dashscope_stt").setLevel(logging.DEBUG)
 logging.getLogger("livekit.agents.voice.agent_activity").setLevel(logging.DEBUG)
 logging.getLogger("livekit.agents.voice.audio_recognition").setLevel(logging.DEBUG)
 logging.getLogger("livekit.agents.voice.room_io").setLevel(logging.DEBUG)
@@ -151,18 +89,7 @@ logging.getLogger("livekit.agents.llm").setLevel(logging.DEBUG)
 logging.getLogger("livekit.plugins.silero").setLevel(logging.DEBUG)
 
 # ============================================================
-# System Prompt 注入入口
-# ============================================================
-# System Prompt 应由外部系统注入，本模块不硬编码任何业务人设。
-# 注入方式：
-#   1. 环境变量 SYSTEM_PROMPT：适合简单 demo / 测试场景
-#   2. HTTP 接口 PROMPT_SERVICE_URL：适合生产环境，支持热更新
-#
-# Prompt 内容应包含：
-#   - 角色设定（你是一个语音助手…）
-#   - 工具调用规范（简洁调用，避免冗余参数）
-#   - 打断行为的说明（用户可在任意时刻打断）
-#   - 对话格式约束（短句优先，避免超长回复导致 TTS 延迟高）
+# 提示词管理
 # ============================================================
 
 _DEFAULT_SYSTEM_PROMPT = (
@@ -706,17 +633,19 @@ def _create_stt(vad=None):
         logger.info("Using OpenAI format ASR")
         return create_openai_stt()
 
-    # 回退到 DashScope Fun-ASR
-    api_key = os.environ.get("DASHSCOPE_API_KEY", "")
-    if not api_key:
-        raise ValueError(
-            "Either OPENAI_ASR_BASE_URL or DASHSCOPE_API_KEY is required. "
-            "Set it in .env or docker-compose.yml"
-        )
-    model = os.environ.get("DASHSCOPE_ASR_MODEL", "fun-asr-realtime")
-    language = os.environ.get("DASHSCOPE_ASR_LANGUAGE", "zh")
-    logger.info(f"Using DashScope ASR: model={model}, language={language}")
-    return DashScopeSTT(api_key=api_key, model=model, language=language)
+    # 回退到 FunASR（使用 DashScope HTTP API）
+    dashscope_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    if dashscope_key:
+        from funasr_stt import DashScopeSTT
+        model = os.environ.get("DASHSCOPE_ASR_MODEL", "fun-asr-realtime")
+        language = os.environ.get("DASHSCOPE_ASR_LANGUAGE", "zh")
+        logger.info(f"Using DashScope ASR: model={model}, language={language}")
+        return DashScopeSTT(api_key=dashscope_key, model=model, language=language)
+
+    raise ValueError(
+        "Either OPENAI_ASR_BASE_URL or DASHSCOPE_API_KEY is required. "
+        "Set it in .env or docker-compose.yml"
+    )
 
 
 # ============================================================
@@ -922,14 +851,8 @@ async def entrypoint(ctx: JobContext):
         tts_adapter._metrics = metrics
         logger.info(f"[entrypoint] Using OpenAI format TTS: base_url={openai_tts_url}")
     else:
-        tts_url = os.environ.get("TTS_SERVICE_URL", "http://localhost:8001")
-        tts_adapter = QwenTTSAdapter(
-            service_url=tts_url,
-            voice=os.environ.get("DASHSCOPE_TTS_VOICE", "Cherry"),
-            timeout=float(os.environ.get("TTS_TIMEOUT", "30")),
-            max_tts_chunk=int(os.environ.get("TTS_MAX_CHUNK", "300")),
-            first_chunk_min=int(os.environ.get("TTS_FIRST_CHUNK_MIN", "30")),
-            metrics=metrics,  # 注入 metrics 用于 TTS 内部上报
+        raise ValueError(
+            "No TTS configuration found. Set QWEN3_TTS_BASE_URL or OPENAI_TTS_API_KEY+OPENAI_TTS_BASE_URL"
         )
 
     # 测试 LLM API 连通性
